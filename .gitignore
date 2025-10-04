@@ -209,3 +209,4 @@ __marimo__/
 
 # venv
 mmt_venv/
+.flake8
