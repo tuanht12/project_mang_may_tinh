@@ -45,7 +45,7 @@ def send_messages(client_socket: socket.socket):
 
         try:
             # Send the message to the server
-            client_socket.send(message.model_dump_json().encode("utf-8"))
+            client_socket.send(message.encoded_bytes)
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
             break
