@@ -12,6 +12,7 @@ from schemas import (
     GenericMessage,
     MessageType,
     ServerResponse,
+    ServerResponseStatus,
 )
 from utils import convert_message_to_string, add_new_user_to_db, verify_user_credentials
 import pandas as pd
@@ -129,7 +130,8 @@ def handle_client(client_socket: socket.socket):
                 if auth_req.action == AuthAction.REGISTER:
                     if auth_req.username in users_df["username"].values:
                         response = ServerResponse(
-                            status="error", message="Username already exists."
+                            status=ServerResponseStatus.ERROR,
+                            message="Username already exists.",
                         )
                     else:
                         users_df = add_new_user_to_db(
@@ -137,7 +139,7 @@ def handle_client(client_socket: socket.socket):
                         )
                         save_users_df(users_df)
                         response = ServerResponse(
-                            status="success",
+                            status=ServerResponseStatus.SUCCESS,
                             message="Registration successful. Please log in.",
                         )
                 elif auth_req.action == AuthAction.LOGIN:
@@ -145,13 +147,14 @@ def handle_client(client_socket: socket.socket):
                         users_df, auth_req.username, auth_req.password
                     ):
                         response = ServerResponse(
-                            status="success",
+                            status=ServerResponseStatus.SUCCESS,
                             message=f"Login successful. Welcome {auth_req.username}!",
                         )
                         username = auth_req.username
                     else:
                         response = ServerResponse(
-                            status="error", message="Invalid username or password."
+                            status=ServerResponseStatus.ERROR,
+                            message="Invalid username or password.",
                         )
                 # Send response back to client
                 response_msg = GenericMessage(
@@ -159,11 +162,15 @@ def handle_client(client_socket: socket.socket):
                 )
                 client_socket.send(response_msg.encoded_bytes)
 
-                if response.status == "success" and auth_req.action == AuthAction.LOGIN:
+                if (
+                    response.status == ServerResponseStatus.SUCCESS
+                    and auth_req.action == AuthAction.LOGIN
+                ):
                     break  # Exit auth loop on successful login
             except (ValidationError, json.JSONDecodeError):
                 response = ServerResponse(
-                    status="error", message="Invalid authentication request format."
+                    status=ServerResponseStatus.ERROR,
+                    message="Invalid authentication request format.",
                 )
                 response_msg = GenericMessage(
                     type=MessageType.RESPONSE, payload=response.model_dump()
