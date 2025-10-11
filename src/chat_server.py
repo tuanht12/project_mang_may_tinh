@@ -14,7 +14,7 @@ from schemas import (
     ServerResponse,
     ServerResponseStatus,
 )
-from utils import convert_message_to_string, add_new_user_to_db, verify_user_credentials
+from utils import add_new_user_to_db, verify_user_credentials
 import pandas as pd
 import os
 
@@ -86,7 +86,7 @@ def handle_chat(client_socket: socket.socket):
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
             if generic_msg.type == MessageType.CHAT:
                 chat_msg = ChatMessage.model_validate(generic_msg.payload)
-                print(convert_message_to_string(chat_msg))
+                print(chat_msg.message_string)
                 broadcast(generic_message_bytes, client_socket)
 
         except ConnectionResetError:

@@ -10,7 +10,6 @@ from schemas import (
 import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT
-from utils import convert_message_to_string
 
 QUIT_COMMAND = "/quit"
 
@@ -30,7 +29,7 @@ def receive_messages(client_socket: socket.socket):
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
             if generic_msg.type == MessageType.CHAT:
                 chat_msg = ChatMessage.model_validate(generic_msg.payload)
-                print(convert_message_to_string(chat_msg))
+                print(chat_msg.message_string)
         except ConnectionResetError:
             print("Connection to the server was lost.")
             break

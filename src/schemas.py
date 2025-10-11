@@ -1,5 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel
+import time
 
 
 class MessageType(str, Enum):
@@ -16,6 +17,14 @@ class ChatMessage(BaseModel):
     @property
     def encoded_bytes(self) -> bytes:
         return self.model_dump_json().encode("utf-8")
+
+    @property
+    def message_string(self) -> str:
+        human_readable_time = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp)
+        )
+
+        return f"[{human_readable_time}] {self.sender}: {self.content}"
 
 
 class GenericMessage(BaseModel):

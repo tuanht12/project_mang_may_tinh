@@ -1,16 +1,6 @@
 import socket
-import time
 
 import pandas as pd
-from schemas import ChatMessage
-
-
-def convert_message_to_string(message: ChatMessage) -> str:
-    human_readable_time = time.strftime(
-        "%Y-%m-%d %H:%M:%S", time.localtime(message.timestamp)
-    )
-
-    return f"[{human_readable_time}] {message.sender}: {message.content}"
 
 
 def get_local_ip():
