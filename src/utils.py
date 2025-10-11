@@ -1,19 +1,6 @@
 import socket
-import time
-from schemas import ChatMessage
 
-
-def convert_message_to_string(message: ChatMessage) -> str:
-    human_readable_time = time.strftime(
-        "%Y-%m-%d %H:%M:%S", time.localtime(message.timestamp)
-    )
-
-    return f"[{human_readable_time}] {message.sender}: {message.content}"
-
-
-def print_message_in_bytes(message_bytes: bytes):
-    message = ChatMessage.model_validate_json(message_bytes.decode("utf-8"))
-    print(convert_message_to_string(message))
+import pandas as pd
 
 
 def get_local_ip():
@@ -31,3 +18,21 @@ def get_local_ip():
     finally:
         s.close()
     return IP
+
+
+def add_new_user_to_db(
+    current_df: pd.DataFrame, username: str, password: str
+) -> pd.DataFrame:
+    if username in current_df["username"].values:
+        return current_df  # Username already exists
+    new_user = pd.DataFrame({"username": [username], "password": [password]})
+    current_df = pd.concat([current_df, new_user], ignore_index=True)
+    return current_df
+
+
+def verify_user_credentials(df: pd.DataFrame, username: str, password: str) -> bool:
+    user_row = df[df["username"] == username]
+    if user_row.empty:
+        return False
+    current_password = str(user_row["password"].iloc[0])
+    return current_password == password
