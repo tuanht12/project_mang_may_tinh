@@ -1,11 +1,13 @@
 import getpass
 import time
 from schemas import (
+    AuthAction,
     AuthRequest,
     ChatMessage,
     GenericMessage,
     MessageType,
     ServerResponse,
+    ServerResponseStatus,
 )
 import socket
 import threading
@@ -85,20 +87,29 @@ def start_client():
 
     client_username = None
     while client_username is None:
-        action = input("Select '1' to login, '2' to register: ").strip()
-        action = "login" if action == "1" else "register" if action == "2" else ""
-        if action not in ["login", "register"]:
+        action = input(
+            f"Select '1' to {AuthAction.LOGIN.value}, '2' to {AuthAction.REGISTER.value},"
+            f"'{QUIT_COMMAND}' to quit: "
+        ).strip()
+        if action == QUIT_COMMAND:
+            print("Exiting...")
+            client_socket.close()
+            return
+        action = (
+            AuthAction.LOGIN
+            if action == "1"
+            else AuthAction.REGISTER if action == "2" else ""
+        )
+        if action not in [AuthAction.LOGIN, AuthAction.REGISTER]:
             print("Invalid option. Please choose '1' or '2'.")
             continue
         username = input("Enter username: ").strip()
         password = getpass.getpass("Enter password: ")  # Hides password input
 
         auth_req = AuthRequest(action=action, username=username, password=password)
-        generic_msg = GenericMessage(
-            type=MessageType.AUTH, payload=auth_req.model_dump()
-        )
+        auth_msg = GenericMessage(type=MessageType.AUTH, payload=auth_req.model_dump())
         try:
-            client_socket.send(generic_msg.encoded_bytes)
+            client_socket.send(auth_msg.encoded_bytes)
 
             response_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
             if not response_bytes:
@@ -110,9 +121,13 @@ def start_client():
                 server_resp = ServerResponse.model_validate(resp_generic.payload)
                 print(f"[SERVER]: {server_resp.message}")
 
-                if server_resp.status == "success" and action == "login":
+                if (
+                    server_resp.status == ServerResponseStatus.SUCCESS
+                    and action == AuthAction.LOGIN
+                ):
                     client_username = username
                     break  # Exit the authentication loop
+                print("Please try again.")
         except Exception as e:
             print(f"An error occurred during authentication: {e}")
             break

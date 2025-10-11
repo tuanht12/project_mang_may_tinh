@@ -81,6 +81,8 @@ def handle_chat(client_socket: socket.socket):
         try:
             generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
             if not generic_message_bytes:
+                peer_name = client_socket.getpeername()
+                print(f"Finished handling chat {peer_name}.")
                 break
 
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
@@ -91,92 +93,102 @@ def handle_chat(client_socket: socket.socket):
 
         except ConnectionResetError:
             # Handle the case where the client forcefully closes the connection
-            print(
-                f"[DISCONNECTED] {client_socket.getpeername()}"
-                f" disconnected unexpectedly."
-            )
+            print(f"{client_socket.getpeername()} disconnected unexpectedly.")
             break
         except Exception as e:
             print(f"[ERROR] {e}")
             break
 
 
-def handle_client(client_socket: socket.socket):
+def handle_auth(client_socket: socket.socket):
     """
-    Handles a new client connection, starting with authentication.
+    Handles authentication for a new client connection.
     This function runs in its own thread for each client.
     Steps:
-    1. Authenticate the user.
-    2. If authentication is successful, start handling chat messages.
-    3. If authentication fails, close the connection.
+    1. Receive AuthRequest from the client.
+    2. Validate credentials against the users CSV.
+    3. Send back a ServerResponse indicating success or failure.
+    4. If successful, return the username for further chat handling.
     """
-    print(f"[NEW CONNECTION] {client_socket.getpeername()} connected.")
+    while True:
+        auth_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+        if not auth_bytes:
+            return  # Client disconnected before authentication
+
+        try:
+            generic_msg = GenericMessage.model_validate_json(auth_bytes)
+            if generic_msg.type != MessageType.AUTH:
+                continue  # Ignore non-auth messages during auth phase
+
+            auth_req = AuthRequest.model_validate(generic_msg.payload)
+            users_df = load_users_df()
+
+            if auth_req.action == AuthAction.REGISTER:
+                if auth_req.username in users_df["username"].values:
+                    response = ServerResponse(
+                        status=ServerResponseStatus.ERROR,
+                        message="Username already exists.",
+                    )
+                else:
+                    users_df = add_new_user_to_db(
+                        users_df, auth_req.username, auth_req.password
+                    )
+                    save_users_df(users_df)
+                    response = ServerResponse(
+                        status=ServerResponseStatus.SUCCESS,
+                        message="Registration successful. Please log in.",
+                    )
+            elif auth_req.action == AuthAction.LOGIN:
+                if verify_user_credentials(
+                    users_df, auth_req.username, auth_req.password
+                ):
+                    response = ServerResponse(
+                        status=ServerResponseStatus.SUCCESS,
+                        message=f"Login successful. Welcome {auth_req.username}!",
+                    )
+                    username = auth_req.username
+                else:
+                    response = ServerResponse(
+                        status=ServerResponseStatus.ERROR,
+                        message="Invalid username or password.",
+                    )
+            # Send response back to client
+            response_msg = GenericMessage(
+                type=MessageType.RESPONSE, payload=response.model_dump()
+            )
+            client_socket.send(response_msg.encoded_bytes)
+
+            if (
+                response.status == ServerResponseStatus.SUCCESS
+                and auth_req.action == AuthAction.LOGIN
+            ):
+                return username
+        except (ValidationError, json.JSONDecodeError):
+            response = ServerResponse(
+                status=ServerResponseStatus.ERROR,
+                message="Invalid authentication request format.",
+            )
+            response_msg = GenericMessage(
+                type=MessageType.RESPONSE, payload=response.model_dump()
+            )
+            client_socket.send(response_msg.encoded_bytes)
+
+
+def handle_client(client_socket: socket.socket):
+    """
+    Handles a new client connection.
+    This function runs in its own thread for each client.
+    """
+    peer_name = client_socket.getpeername()
+    print(f"[NEW CONNECTION] {peer_name} connected.")
+
     username = None
     try:
-        while True:
-            auth_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
-            if not auth_bytes:
-                print(f"[DISCONNECTED] {client_socket.getpeername()} disconnected.")
-                return  # Client disconnected before authentication
-
-            try:
-                generic_msg = GenericMessage.model_validate_json(auth_bytes)
-                if generic_msg.type != MessageType.AUTH:
-                    continue  # Ignore non-auth messages during auth phase
-
-                auth_req = AuthRequest.model_validate(generic_msg.payload)
-                users_df = load_users_df()
-
-                if auth_req.action == AuthAction.REGISTER:
-                    if auth_req.username in users_df["username"].values:
-                        response = ServerResponse(
-                            status=ServerResponseStatus.ERROR,
-                            message="Username already exists.",
-                        )
-                    else:
-                        users_df = add_new_user_to_db(
-                            users_df, auth_req.username, auth_req.password
-                        )
-                        save_users_df(users_df)
-                        response = ServerResponse(
-                            status=ServerResponseStatus.SUCCESS,
-                            message="Registration successful. Please log in.",
-                        )
-                elif auth_req.action == AuthAction.LOGIN:
-                    if verify_user_credentials(
-                        users_df, auth_req.username, auth_req.password
-                    ):
-                        response = ServerResponse(
-                            status=ServerResponseStatus.SUCCESS,
-                            message=f"Login successful. Welcome {auth_req.username}!",
-                        )
-                        username = auth_req.username
-                    else:
-                        response = ServerResponse(
-                            status=ServerResponseStatus.ERROR,
-                            message="Invalid username or password.",
-                        )
-                # Send response back to client
-                response_msg = GenericMessage(
-                    type=MessageType.RESPONSE, payload=response.model_dump()
-                )
-                client_socket.send(response_msg.encoded_bytes)
-
-                if (
-                    response.status == ServerResponseStatus.SUCCESS
-                    and auth_req.action == AuthAction.LOGIN
-                ):
-                    break  # Exit auth loop on successful login
-            except (ValidationError, json.JSONDecodeError):
-                response = ServerResponse(
-                    status=ServerResponseStatus.ERROR,
-                    message="Invalid authentication request format.",
-                )
-                response_msg = GenericMessage(
-                    type=MessageType.RESPONSE, payload=response.model_dump()
-                )
-                client_socket.send(response_msg.encoded_bytes)
-
+        # --- Authentication Phase ---
+        username = handle_auth(client_socket)
+        if username is None:
+            print(f"{peer_name} failed to authenticate.")
+            return
         # --- Chat Phase ---
         print(f"[{username}] has successfully logged in.")
         with clients_lock:
@@ -185,7 +197,7 @@ def handle_client(client_socket: socket.socket):
 
     finally:
         # --- Cleanup ---
-        print(f"[DISCONNECTED] {username or client_socket.getpeername()} disconnected.")
+        print(f"[DISCONNECTED] Disconnected {peer_name}.")
         with clients_lock:
             if client_socket in clients:
                 clients.remove(client_socket)
