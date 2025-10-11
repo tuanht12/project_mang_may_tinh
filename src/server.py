@@ -2,6 +2,7 @@ import json
 from typing import List
 
 from pydantic import ValidationError
+from chat_client import ChatClient
 from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST
 import socket
 import threading
@@ -20,7 +21,7 @@ import os
 
 # --- State ---
 # List to keep track of all connected client sockets
-clients: List[socket.socket] = []
+clients: List[ChatClient] = []
 # Lock to ensure that the clients list is accessed by only one thread at a time
 clients_lock = threading.Lock()
 DB_PATH = "db"
@@ -58,49 +59,48 @@ def create_server_socket():
     return server_socket
 
 
-def broadcast(message_bytes: bytes, sender_socket: socket.socket):
+def broadcast(message_bytes: bytes, sending_client: ChatClient):
     """
     Sends a message (in bytes) to all connected clients except the sender.
     """
     with clients_lock:
         for client in clients:
-            if client != sender_socket:
+            if client != sending_client:
                 try:
-                    client.send(message_bytes)
+                    client.socket.send(message_bytes)
                 except Exception as e:
                     print(f"Failed to send message to a client. Error: {e}")
-                    client.close()
+                    client.socket.close()
                     clients.remove(client)
 
 
-def handle_chat(client_socket: socket.socket):
+def handle_chat(client: ChatClient):
     """
     Handles chat messages from an authenticated client.
     """
     while True:
         try:
-            generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+            generic_message_bytes = client.socket.recv(DEFAULT_BUFFER_SIZE)
             if not generic_message_bytes:
-                peer_name = client_socket.getpeername()
-                print(f"Finished handling chat {peer_name}.")
+                print(f"Finished handling chat {client.peer_name}.")
                 break
 
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
             if generic_msg.type == MessageType.CHAT:
                 chat_msg = ChatMessage.model_validate(generic_msg.payload)
                 print(chat_msg.message_string)
-                broadcast(generic_message_bytes, client_socket)
+                broadcast(generic_message_bytes, client)
 
         except ConnectionResetError:
             # Handle the case where the client forcefully closes the connection
-            print(f"{client_socket.getpeername()} disconnected unexpectedly.")
+            print(f"{client.peer_name} disconnected unexpectedly.")
             break
         except Exception as e:
             print(f"[ERROR] {e}")
             break
 
 
-def handle_auth(client_socket: socket.socket):
+def handle_auth(client: ChatClient):
     """
     Handles authentication for a new client connection.
     This function runs in its own thread for each client.
@@ -111,7 +111,7 @@ def handle_auth(client_socket: socket.socket):
     4. If successful, return the username for further chat handling.
     """
     while True:
-        auth_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+        auth_bytes = client.socket.recv(DEFAULT_BUFFER_SIZE)
         if not auth_bytes:
             return  # Client disconnected before authentication
 
@@ -156,7 +156,7 @@ def handle_auth(client_socket: socket.socket):
             response_msg = GenericMessage(
                 type=MessageType.RESPONSE, payload=response.model_dump()
             )
-            client_socket.send(response_msg.encoded_bytes)
+            client.socket.send(response_msg.encoded_bytes)
 
             if (
                 response.status == ServerResponseStatus.SUCCESS
@@ -171,37 +171,38 @@ def handle_auth(client_socket: socket.socket):
             response_msg = GenericMessage(
                 type=MessageType.RESPONSE, payload=response.model_dump()
             )
-            client_socket.send(response_msg.encoded_bytes)
+            client.socket.send(response_msg.encoded_bytes)
 
 
-def handle_client(client_socket: socket.socket):
+def handle_client(client: ChatClient):
     """
     Handles a new client connection.
     This function runs in its own thread for each client.
     """
-    peer_name = client_socket.getpeername()
+    peer_name = client.peer_name
     print(f"[NEW CONNECTION] {peer_name} connected.")
 
     username = None
     try:
         # --- Authentication Phase ---
-        username = handle_auth(client_socket)
+        username = handle_auth(client)
         if username is None:
             print(f"{peer_name} failed to authenticate.")
             return
         # --- Chat Phase ---
         print(f"[{username}] has successfully logged in.")
+        client.username = username
         with clients_lock:
-            clients.append(client_socket)
-        handle_chat(client_socket)
+            clients.append(client)
+        handle_chat(client)
 
     finally:
         # --- Cleanup ---
         print(f"[DISCONNECTED] Disconnected {peer_name}.")
         with clients_lock:
-            if client_socket in clients:
-                clients.remove(client_socket)
-        client_socket.close()
+            if client in clients:
+                clients.remove(client)
+        client.socket.close()
 
 
 if __name__ == "__main__":
@@ -210,7 +211,7 @@ if __name__ == "__main__":
 
     while True:
         client_socket, addr = server_socket.accept()
-
-        thread = threading.Thread(target=handle_client, args=(client_socket,))
+        chat_client = ChatClient(socket=client_socket)
+        thread = threading.Thread(target=handle_client, args=(chat_client,))
         thread.daemon = True  # Allows main program to exit even if threads are running
         thread.start()

@@ -34,5 +34,5 @@ def verify_user_credentials(df: pd.DataFrame, username: str, password: str) -> b
     user_row = df[df["username"] == username]
     if user_row.empty:
         return False
-    current_password = user_row.iloc[0]["password"].astype(str)
+    current_password = str(user_row["password"].iloc[0])
     return current_password == password
