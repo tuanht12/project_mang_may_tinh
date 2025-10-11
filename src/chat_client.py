@@ -1,5 +1,12 @@
+import getpass
 import time
-from schemas import ChatMessage, GenericMessage, MessageType
+from schemas import (
+    AuthRequest,
+    ChatMessage,
+    GenericMessage,
+    MessageType,
+    ServerResponse,
+)
 import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT
@@ -31,12 +38,10 @@ def receive_messages(client_socket: socket.socket):
             break
 
 
-def send_messages(client_socket: socket.socket):
+def send_messages(client_socket: socket.socket, nickname: str):
     """
     Takes user input and sends it to the server.
     """
-    nickname = input("Choose your nickname: ")
-
     while True:
         try:
             # Get message from user input
@@ -74,13 +79,49 @@ def start_client():
         print("Connection failed. Is the server running?")
         return
 
-    # --- Start threads for sending and receiving messages ---
-    receive_thread = threading.Thread(target=receive_messages, args=(client_socket,))
-    receive_thread.daemon = True
-    receive_thread.start()
+    client_username = None
+    while client_username is None:
+        action = input("Select '1' to login, '2' to register: ").strip()
+        action = "login" if action == "1" else "register" if action == "2" else ""
+        if action not in ["login", "register"]:
+            print("Invalid option. Please choose '1' or '2'.")
+            continue
+        username = input("Enter username: ").strip()
+        password = getpass.getpass("Enter password: ")  # Hides password input
 
-    # The main thread will handle sending messages
-    send_messages(client_socket)
+        auth_req = AuthRequest(action=action, username=username, password=password)
+        generic_msg = GenericMessage(
+            type=MessageType.AUTH, payload=auth_req.model_dump()
+        )
+        try:
+            client_socket.send(generic_msg.encoded_bytes)
+
+            response_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+            if not response_bytes:
+                print("Server disconnected during authentication.")
+                return
+
+            resp_generic = GenericMessage.model_validate_json(response_bytes)
+            if resp_generic.type == MessageType.RESPONSE:
+                server_resp = ServerResponse.model_validate(resp_generic.payload)
+                print(f"[SERVER]: {server_resp.message}")
+
+                if server_resp.status == "success" and action == "login":
+                    client_username = username
+                    break  # Exit the authentication loop
+        except Exception as e:
+            print(f"An error occurred during authentication: {e}")
+            break
+    # --- Start threads for sending and receiving messages ---
+    if client_username:
+        receive_thread = threading.Thread(
+            target=receive_messages, args=(client_socket,)
+        )
+        receive_thread.daemon = True
+        receive_thread.start()
+
+        # The main thread will handle sending messages
+        send_messages(client_socket, client_username)
 
     # --- Cleanup ---
     client_socket.close()
