@@ -32,6 +32,7 @@ def load_users_df():
     Creates the file if it doesn't exist."""
     with csv_lock:
         if not os.path.exists(USERS_CSV):
+            os.makedirs(DB_PATH, exist_ok=True)
             df = pd.DataFrame(columns=["username", "password"])
             df.to_csv(USERS_CSV, index=False)
             return df
