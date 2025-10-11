@@ -18,7 +18,8 @@ csv_lock = threading.Lock()  # Lock for accessing the CSV file
 
 
 def load_users_df():
-    """Loads the users CSV into a pandas DataFrame. Creates the file if it doesn't exist."""
+    """Loads the users CSV into a pandas DataFrame.
+    Creates the file if it doesn't exist."""
     with csv_lock:
         if not os.path.exists(USERS_CSV):
             df = pd.DataFrame(columns=["username", "password"])

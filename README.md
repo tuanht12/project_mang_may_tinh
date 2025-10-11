@@ -36,9 +36,9 @@
     ```
 
 5. **Run a Test Script**  
-    To verify your setup, create a file named `hello_world.py` run the script:
+    To verify your setup, create a file named `test_setup_env.py` run the script:
     ```bash
-    python hello_world.py
+    python test_setup_env.py
     ```
     If you see `Hello, world!` and `All modules imported successfully.` printed, your environment is set up correctly.
 
