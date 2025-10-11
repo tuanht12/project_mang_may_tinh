@@ -100,6 +100,12 @@ def handle_chat(client: ChatClient):
             break
 
 
+def is_username_active(username: str) -> bool:
+    """Check if a username is already active in the chat."""
+    with clients_lock:
+        return any(client.username == username for client in clients)
+
+
 def handle_auth(client: ChatClient):
     """
     Handles authentication for a new client connection.
@@ -110,6 +116,7 @@ def handle_auth(client: ChatClient):
     3. Send back a ServerResponse indicating success or failure.
     4. If successful, return the username for further chat handling.
     """
+    username = None
     while True:
         auth_bytes = client.socket.recv(DEFAULT_BUFFER_SIZE)
         if not auth_bytes:
@@ -141,12 +148,17 @@ def handle_auth(client: ChatClient):
             elif auth_req.action == AuthAction.LOGIN:
                 if verify_user_credentials(
                     users_df, auth_req.username, auth_req.password
-                ):
+                ) and not is_username_active(auth_req.username):
                     response = ServerResponse(
                         status=ServerResponseStatus.SUCCESS,
                         message=f"Login successful. Welcome {auth_req.username}!",
                     )
                     username = auth_req.username
+                elif is_username_active(auth_req.username):
+                    response = ServerResponse(
+                        status=ServerResponseStatus.ERROR,
+                        message="This user is already logged in.",
+                    )
                 else:
                     response = ServerResponse(
                         status=ServerResponseStatus.ERROR,
