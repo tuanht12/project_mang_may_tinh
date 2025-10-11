@@ -11,11 +11,6 @@ def convert_message_to_string(message: ChatMessage) -> str:
     return f"[{human_readable_time}] {message.sender}: {message.content}"
 
 
-def print_message_in_bytes(message_bytes: bytes):
-    message = ChatMessage.model_validate_json(message_bytes.decode("utf-8"))
-    print(convert_message_to_string(message))
-
-
 def get_local_ip():
     """
     Tries to determine the local IP address of the machine.

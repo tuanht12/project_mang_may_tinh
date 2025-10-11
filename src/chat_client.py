@@ -1,9 +1,9 @@
 import time
-from schemas import ChatMessage
+from schemas import ChatMessage, GenericMessage, MessageType
 import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT
-from utils import print_message_in_bytes
+from utils import convert_message_to_string
 
 
 def receive_messages(client_socket: socket.socket):
@@ -13,12 +13,15 @@ def receive_messages(client_socket: socket.socket):
     while True:
         try:
             # Receive message from the server
-            message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
-            if not message_bytes:
+            generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+            if not generic_message_bytes:
                 # If the server closes the connection, recv returns an empty string
                 print("Disconnected from server.")
                 break
-            print_message_in_bytes(message_bytes)
+            generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
+            if generic_msg.type == MessageType.CHAT:
+                chat_msg = ChatMessage.model_validate(generic_msg.payload)
+                print(convert_message_to_string(chat_msg))
         except ConnectionResetError:
             print("Connection to the server was lost.")
             break
@@ -35,17 +38,23 @@ def send_messages(client_socket: socket.socket):
     nickname = input("Choose your nickname: ")
 
     while True:
-        # Get message from user input
-        message_text = input("> ")
-
-        # Format the message with the nickname
-        message = ChatMessage(
-            sender=nickname, content=message_text, timestamp=int(time.time())
-        )
-
         try:
-            # Send the message to the server
-            client_socket.send(message.encoded_bytes)
+            # Get message from user input
+            message_text = input("> ")
+            if message_text:
+                # Format the message with the nickname
+                chat_msg = ChatMessage(
+                    sender=nickname, content=message_text, timestamp=int(time.time())
+                )
+                generic_msg = GenericMessage(
+                    type=MessageType.CHAT, payload=chat_msg.model_dump()
+                )
+
+                # Send the message to the server
+                client_socket.send(generic_msg.encoded_bytes)
+        except (EOFError, KeyboardInterrupt):
+            print("\nDisconnecting...")
+            break
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
             break

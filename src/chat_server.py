@@ -2,13 +2,35 @@ from typing import List
 from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST
 import socket
 import threading
-from utils import print_message_in_bytes
+from schemas import ChatMessage, GenericMessage, MessageType
+from utils import convert_message_to_string
+import pandas as pd
+import os
 
 # --- State ---
 # List to keep track of all connected client sockets
 clients: List[socket.socket] = []
 # Lock to ensure that the clients list is accessed by only one thread at a time
 clients_lock = threading.Lock()
+
+USERS_CSV = "users.csv"  # Path to the CSV file storing user data
+csv_lock = threading.Lock()  # Lock for accessing the CSV file
+
+
+def load_users_df():
+    """Loads the users CSV into a pandas DataFrame. Creates the file if it doesn't exist."""
+    with csv_lock:
+        if not os.path.exists(USERS_CSV):
+            df = pd.DataFrame(columns=["username", "password"])
+            df.to_csv(USERS_CSV, index=False)
+            return df
+        return pd.read_csv(USERS_CSV)
+
+
+def save_users_df(df: pd.DataFrame):
+    """Saves the DataFrame back to the CSV file."""
+    with csv_lock:
+        df.to_csv(USERS_CSV, index=False)
 
 
 def create_server_socket():
@@ -38,23 +60,22 @@ def broadcast(message_bytes: bytes, sender_socket: socket.socket):
                     clients.remove(client)
 
 
-def handle_client(client_socket: socket.socket):
+def handle_chat(client_socket: socket.socket):
     """
-    Handles a single client connection. This function will be run in its own thread.
+    Handles chat messages from an authenticated client.
     """
-    print(f"[NEW CONNECTION] {client_socket.getpeername()} connected.")
-
     while True:
         try:
-            # Receive message from the client (up to DEFAULT_BUFFER_SIZE bytes)
-            message_byte = client_socket.recv(DEFAULT_BUFFER_SIZE)
-            if not message_byte:
-                # If message bytes is empty -> the client has disconnected
+            generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+            if not generic_message_bytes:
                 break
 
-            # Print the message to the server console and broadcast it to other clients
-            print_message_in_bytes(message_byte)
-            broadcast(message_byte, client_socket)
+            generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
+            if generic_msg.type == MessageType.CHAT:
+                chat_msg = ChatMessage.model_validate(generic_msg.payload)
+                print(convert_message_to_string(chat_msg))
+                broadcast(generic_message_bytes, client_socket)
+
         except ConnectionResetError:
             # Handle the case where the client forcefully closes the connection
             print(
@@ -65,6 +86,15 @@ def handle_client(client_socket: socket.socket):
         except Exception as e:
             print(f"[ERROR] {e}")
             break
+
+
+def handle_client(client_socket: socket.socket):
+    """
+    Handles a single client connection. This function will be run in its own thread.
+    """
+    print(f"[NEW CONNECTION] {client_socket.getpeername()} connected.")
+
+    handle_chat(client_socket)
 
     # When the loop breaks, the client has disconnected.
     print(f"[DISCONNECTED] {client_socket.getpeername()} disconnected.")
