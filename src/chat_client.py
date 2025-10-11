@@ -12,6 +12,8 @@ import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT
 from utils import convert_message_to_string
 
+QUIT_COMMAND = "/quit"
+
 
 def receive_messages(client_socket: socket.socket):
     """
@@ -46,6 +48,9 @@ def send_messages(client_socket: socket.socket, nickname: str):
         try:
             # Get message from user input
             message_text = input("> ")
+            if message_text.strip() == QUIT_COMMAND:
+                print("Exiting chat...")
+                break
             if message_text:
                 # Format the message with the nickname
                 chat_msg = ChatMessage(
