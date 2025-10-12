@@ -1,0 +1,150 @@
+
+
+=================================================================================
+
+
+• PM (tin nhắn riêng) 
+• ROOM (tạo/join/leave + **room tag UI**) 
+• RECONNECT 
+• HISTORY
+
+
+0) Tóm tắt nhanh
+----------------
+• Transport: TCP sockets; server chạy thread-per-client.  
+• Payload: `ChatMessage { sender, content, timestamp }` ⇄ JSON (UTF‑8).  
+• Giao thức: slash‑commands trong `content` (`/join`, `/create`, `/pm`, `/history`, …).
+• Phòng: `lobby` mặc định + phòng tuỳ ý; mỗi client ở **1 phòng** tại một thời điểm.
+• **Room tag UI**: server gắn `[#{room}]` vào **chat thường** trước khi broadcast; một số
+  system message cũng có `#room`.  
+• Client: auto‑reconnect (1→2→3→5s)(`/users` ⇒ lobby, rồi `/join LAST_ROOM`).
+• Log: file append‑only cho phòng & DM; `/history` lấy “N dòng cuối”.  
+• Non‑OOP: state ở module (dict/set), khoá `RLock/Lock` để đồng bộ.
+
+1) Cấu trúc file & vai trò
+--------------------------
+- **configs.py**: SERVER_HOST, SERVER_PORT, DEFAULT_BUFFER_SIZE.  
+- **schemas.py**: Pydantic `ChatMessage`; `.encoded_bytes` → dump JSON bytes.  
+- **utils.py**: `print_message_in_bytes(raw)` → decode & in; helper khác.  
+- **chat_sever.py**: socket listen, accept, `handle_client()`; command router; rooms/PM; log.  
+- **chat_client.py**: 2 luồng send/recv; auto‑reconnect + handshake; tách JSON dính liền; theo dõi LAST_ROOM.
+
+2) Trạng thái server (module‑level)
+-----------------------------------
+```
+name_to_sock: Dict[nickname, socket]
+sock_to_name: Dict[socket, nickname]
+rooms:       Dict[room, Set[socket]]      # {"lobby": set(), ...}
+sock_room:   Dict[socket, room]
+clients:     List[socket]                 
+locks:       state_lock (RLock), clients_lock (Lock)
+```
+- `register_if_needed(sock, sender)` gắn nickname duy nhất (bob, bob2, …), cho vào `lobby`,
+  broadcast “<name> joined #lobby”.
+
+3) Giao thức lệnh (command‑over‑content)
+----------------------------------------
+- `/help`, `/rooms`, `/users`
+- `/create <room>` (hoặc `/create room <room>`), `/join <room>`, `/leave`  
+- `/pm @user <message>` (alias `/w user ...`)  
+- `/history [N]` (phòng hiện tại), `/history @user [N]` (DM)
+
+Server: nếu `content` bắt đầu bằng `/` ⇒ xử lý lệnh và **không broadcast**. Ngược lại, coi là chat thường.
+
+4) Tính năng chi tiết
+---------------------
+
+4.1 ROOM — tạo/join/leave & **Room tag UI**
+-------------------------------------------
+• Membership:
+```
+def leave_current_room(sock):
+    with state_lock:
+        room = sock_room.get(sock)
+        if room and sock in rooms.get(room, set()):
+            rooms[room].discard(sock)
+            who = sock_to_name.get(sock, "someone")
+            broadcast_room(room, system_message(f"{who} left #{room}"))
+        sock_room[sock] = ""
+
+def join_room(sock, room):
+    with state_lock:
+        leave_current_room(sock)
+        rooms.setdefault(room, set()).add(sock)
+        sock_room[sock] = room
+        who = sock_to_name.get(sock, "someone")
+        broadcast_room(room, system_message(f"{who} joined #{room}"))
+```
+• Phản hồi lệnh: `/create` → “Created and joined #<room>”, `/join` → “Joined #<room>”,
+`/users` → “Users in #<room> …”, `/whereami` → “You are in #<room>”.
+
+• **Room tag cho chat thường (UI)** — trong `handle_client()`:
+```
+room = sock_room.get(client_socket, "lobby")
+tagged = ChatMessage(sender=msg.sender,
+                     content=f"[#{room}] {msg.content}",
+                     timestamp=msg.timestamp)
+broadcast_room(room, tagged)      # gửi cho mọi người trong phòng (kể cả người gửi)
+# Log thì vẫn dùng nội dung gốc (không tag)
+append_history_line(room_log_filename(room),
+                    f"{msg.timestamp}\t{msg.sender}\t{msg.content}")
+```
+→ Trên console sẽ là: `[...] Alice: [#room1] hello`.
+
+4.2 PM — tin nhắn riêng
+-----------------------
+• Lệnh: `/pm @bob xin chào` (hoặc `/w bob xin chào`).  
+• Server:
+```
+target = name_to_sock.get(target_name)
+if not target: send system "User @... not found"
+else:
+    dm_text = " ".join(parts[2:])
+    dm = ChatMessage(sender=sender, content=f"(PM to @{target_name}) {dm_text}", timestamp=now_ts())
+    send_chat(target, dm)  # gửi cho người nhận
+    send_chat(sock, dm)    # echo cho người gửi
+    append_history_line(dm_log_filename(sender, target_name),
+                        f"{dm.timestamp}\t{sender}\t{dm_text}")
+```
+• DM log dùng chung file theo cặp `dm__alice__bob.log` (tên cặp **sắp xếp**).
+
+4.3 RECONNECT — client tự nối lại + handshake
+---------------------------------------------
+• Kích hoạt khi `recv()` rỗng/IO error (không vì lỗi parse).  
+• Backoff 1 → 2 → 3 → 5 giây; `reconnect_lock` chống nhiều thread cùng reconnect.  
+• Sau khi nối lại:
+  1) Gửi `/users` để server `register_if_needed()` ⇒ vào `lobby` ngay.  
+  2) Nếu có `LAST_ROOM` và ≠ `lobby` ⇒ gửi `/join LAST_ROOM` để trở lại phòng cũ.
+• Client có **regex** bắt `[#room]` và các system “Joined/Created and joined/Users in/You are in #room”
+  để tự cập nhật `LAST_ROOM` từ message đến.  
+• Gửi thất bại sẽ reconnect và **thử gửi lại 1 lần**.
+
+4.4 HISTORY — nhật ký hội thoại
+-------------------------------
+• Thư mục: `logs/`  
+  - Phòng: `room__<room>.log`  
+  - PM:    `dm__<a>__<b>.log` (a,b **sort** không phân biệt hoa/thường)  
+• Dòng TSV: `timestamp\t sender\t content` (UTF‑8).  
+• Khi ghi: chat thường ⇒ file **phòng**; PM ⇒ file **cặp PM**. **Không** ghi room tag vào file.  
+• Khi đọc: `/history N` (phòng hiện tại), `/history @user N` (DM) ⇒ dùng `tail_history(path, N)`.
+
+5) Hành vi client (recv/send & xử lý JSON dính liền)
+----------------------------------------------------
+• `receive_loop()`:
+  - `recv(DEFAULT_BUFFER_SIZE)`; nếu 0 byte/IO error ⇒ “Lost connection” → `reconnect_loop()`.
+  - Tách một chunk thành nhiều JSON theo depth `{}`; parse từng cái, gọi `print_message_in_bytes` để in.
+  - Lỗi parse ⇒ chỉ WARN và bỏ qua (không reconnect).  
+• `send_loop()`:
+  - Cập nhật `LAST_ROOM` khi người dùng gõ `/join`/`/create`.
+  - Khi `sendall` lỗi ⇒ reconnect rồi thử lại 1 lần.
+
+6) Checklist kiểm thử
+---------------------
+[ ] Start server, 2 client.  
+[ ] A: `/create room1` → thấy “Created and joined #room1”.  
+[ ] A gửi `hello` → cả A & B trong room1 thấy `[#room1] hello`; file `room__room1.log` ghi không kèm tag.  
+[ ] PM: `/pm @B hi` → cả hai thấy tin; `dm__a__b.log` có dòng mới.  
+[ ] `/history 5` trong room1 → ra 5 dòng cuối; `/history @B 3` → ra 3 dòng DM.  
+[ ] Tắt server, bật lại → client tự “Reconnected.” và `/users` + `/join room1`.
+
+

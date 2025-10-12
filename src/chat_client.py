@@ -1,7 +1,8 @@
-# chat_client.py — auto-reconnect + auto-register-to-lobby (no NDJSON)
+# chat_client.py — auto-reconnect + auto-register-to-lobby + auto-track room (no NDJSON)
 import socket
 import threading
 import time
+import re
 from typing import Optional
 from configs import SERVER_HOST, SERVER_PORT, DEFAULT_BUFFER_SIZE
 from schemas import ChatMessage
@@ -14,7 +15,7 @@ current_socket: Optional[socket.socket] = None
 stop_flag = False
 
 NICKNAME = ""
-LAST_ROOM = ""  # nhớ phòng gần nhất khi user dùng /join hoặc /create
+LAST_ROOM = ""  # nhớ phòng gần nhất khi user dùng /join hoặc /create, hoặc khi server thông báo
 
 # ---- Helpers ----
 def connect_once() -> socket.socket:
@@ -37,6 +38,7 @@ def send_chat_raw(sock: socket.socket, content: str):
     sock.sendall(msg.encoded_bytes)
 
 def maybe_capture_last_room(user_input: str):
+    """Cập nhật LAST_ROOM khi người dùng gõ /join|/create (hỗ trợ '/join room <name>')."""
     global LAST_ROOM
     parts = user_input.strip().split()
     if len(parts) < 2:
@@ -81,7 +83,7 @@ def reconnect_loop():
                 s = connect_once()
                 set_socket(s)
                 print("[client] Reconnected.")
-                handshake_after_connect(s)   # <— thêm handshake sau reconnect
+                handshake_after_connect(s)   # <— handshake sau reconnect
                 return
             except Exception:
                 print(f"[client] Reconnect failed. Retry in {delay}s ...")
@@ -90,8 +92,7 @@ def reconnect_loop():
     finally:
         reconnect_lock.release()
 
-# ---- Threads ----
-# --- thêm helper ở phía trên file (bất kỳ sau imports) ---
+# ---- JSON chunk helpers ----
 def split_concatenated_json_bytes(b: bytes):
     """
     Tách 1 chunk bytes có thể chứa N object JSON dính liền thành list[bytes].
@@ -126,11 +127,44 @@ def split_concatenated_json_bytes(b: bytes):
     # nếu không tách được gì, trả nguyên chunk để caller tự xử lý
     return out or [b]
 
-# --- thay toàn bộ hàm receive_loop bằng bản dưới ---
+# ---- Room tracking from incoming messages ----
+_room_tag_re = re.compile(r'^\[\#([A-Za-z0-9_\-]+)\]\s')
+_room_sys_join_re = re.compile(r'(?:Created and joined|Joined)\s+(?:room\s+)?#?([A-Za-z0-9_\-]+)', re.IGNORECASE)
+_room_sys_users_re = re.compile(r'Users in\s+#?([A-Za-z0-9_\-]+)', re.IGNORECASE)
+_room_sys_whereami_re = re.compile(r'You are in\s+#?([A-Za-z0-9_\-]+)', re.IGNORECASE)
+
+def update_last_room_from_msg_obj(msg: ChatMessage):
+    """
+    Cập nhật LAST_ROOM dựa vào nội dung message server gửi về.
+    Bắt các case:
+      - Chat thường có tag:      "[#lab1] hello"
+      - System: "Joined #lab1" | "Created and joined #lab1" | "Users in #lab1" | "You are in #lab1"
+      - Cũng hỗ trợ phiên bản không '#': "Joined room lab1", "Users in lab1", ...
+    """
+    global LAST_ROOM
+    content = (msg.content or "").strip()
+
+    # 1) Chat có tag [#room]
+    m = _room_tag_re.match(content)
+    if m:
+        LAST_ROOM = m.group(1)
+        return
+
+    # 2) System messages
+    #    Lưu ý: utils.print_message_in_bytes quyết định cách hiển thị,
+    #    ở đây chỉ cố gắng bắt càng nhiều mẫu càng tốt.
+    for rex in (_room_sys_join_re, _room_sys_users_re, _room_sys_whereami_re):
+        m = rex.search(content)
+        if m:
+            LAST_ROOM = m.group(1)
+            return
+
+# ---- Threads ----
 def receive_loop():
     """
     Luồng nhận: chỉ coi là 'lost connection' khi socket đóng / lỗi I/O.
     Lỗi parse JSON thì cố tách/chấp nhận bỏ qua, KHÔNG reconnect.
+    Đồng thời tự cập nhật LAST_ROOM từ message đến (system/chat có tag).
     """
     while not stop_flag:
         s = get_socket()
@@ -146,6 +180,9 @@ def receive_loop():
             # Có thể chứa nhiều JSON dính nhau -> tách rồi in từng cái
             for piece in split_concatenated_json_bytes(data):
                 try:
+                    # parse để cập nhật LAST_ROOM, rồi in ra bằng util mặc định
+                    msg = ChatMessage.model_validate_json(piece.decode("utf-8"))
+                    update_last_room_from_msg_obj(msg)
                     print_message_in_bytes(piece)
                 except Exception as e:
                     # cảnh báo nhẹ rồi bỏ qua message lỗi, không coi là rớt mạng

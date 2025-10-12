@@ -1,3 +1,4 @@
+# chat_sever.py  — non-OOP, show room tag in chats + system messages
 from typing import List, Dict, Set, Optional
 from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST
 import socket
@@ -83,6 +84,9 @@ def broadcast_room(room: str, msg: ChatMessage, exclude: Optional[socket.socket]
             continue
         send_chat(s, msg)
 
+# -------------------------
+# Membership helpers
+# -------------------------
 def register_if_needed(sock: socket.socket, sender: str):
     # gắn nickname lần đầu & cho vào lobby
     with state_lock:
@@ -100,7 +104,7 @@ def register_if_needed(sock: socket.socket, sender: str):
             rooms.setdefault("lobby", set()).add(sock)
             sock_room[sock] = "lobby"
 
-            broadcast_room("lobby", system_message(f"{name} joined lobby"))
+            broadcast_room("lobby", system_message(f"{name} joined #lobby"))
 
 def leave_current_room(sock: socket.socket):
     with state_lock:
@@ -109,7 +113,7 @@ def leave_current_room(sock: socket.socket):
             if sock in rooms.get(room, set()):
                 rooms[room].discard(sock)
                 who = sock_to_name.get(sock, "someone")
-                broadcast_room(room, system_message(f"{who} left {room}"))
+                broadcast_room(room, system_message(f"{who} left #{room}"))
         sock_room[sock] = ""
 
 def join_room(sock: socket.socket, room: str):
@@ -118,8 +122,11 @@ def join_room(sock: socket.socket, room: str):
         rooms.setdefault(room, set()).add(sock)
         sock_room[sock] = room
         who = sock_to_name.get(sock, "someone")
-        broadcast_room(room, system_message(f"{who} joined {room}"))
+        broadcast_room(room, system_message(f"{who} joined #{room}"))
 
+# -------------------------
+# Command interpreter
+# -------------------------
 def handle_command(sock: socket.socket, msg: ChatMessage) -> bool:
     """
     Trả về True nếu là lệnh và đã xử lý; False nếu không phải lệnh.
@@ -138,12 +145,13 @@ def handle_command(sock: socket.socket, msg: ChatMessage) -> bool:
             "/help - this help\n"
             "/rooms - list rooms\n"
             "/users - list users in current room\n"
-            "/create <room> - create a room and join\n"
-            "/join <room> - join a room\n"
+            "/create <room> | /create room <room>\n"
+            "/join <room>   | /join room <room>\n"
             "/leave - leave current room to lobby\n"
             "/pm <user> <message> - send private message\n"
             "/history [N] - last N lines for current room (default 20)\n"
             "/history @user [N] - last N lines for DM with @user\n"
+            "/whereami - show current room\n"
         )
         send_chat(sock, system_message(help_text))
         return True
@@ -152,7 +160,7 @@ def handle_command(sock: socket.socket, msg: ChatMessage) -> bool:
     if cmd == "/rooms":
         with state_lock:
             names = sorted(rooms.keys())
-        send_chat(sock, system_message("Rooms: " + ", ".join(names)))
+        send_chat(sock, system_message("Rooms: " + ", ".join(f"#{r}" for r in names)))
         return True
 
     # /users
@@ -160,26 +168,37 @@ def handle_command(sock: socket.socket, msg: ChatMessage) -> bool:
         with state_lock:
             room = sock_room.get(sock, "lobby")
             names = [sock_to_name.get(s, "?") for s in rooms.get(room, set())]
-        send_chat(sock, system_message(f"Users in {room}: " + ", ".join(sorted(names))))
+        send_chat(sock, system_message(f"Users in #{room}: " + ", ".join(sorted(names))))
         return True
 
-    # /create <room>
+    # /create <room>  (or "/create room <room>")
     if cmd == "/create" and len(parts) >= 2:
         room = parts[1]
+        if room.lower() == "room" and len(parts) >= 3:
+            room = parts[2]
         join_room(sock, room)
-        send_chat(sock, system_message(f"Created and joined room {room}"))
+        send_chat(sock, system_message(f"Created and joined #{room}"))
         return True
 
-    # /join <room>
+    # /join <room>  (or "/join room <room>")
     if cmd == "/join" and len(parts) >= 2:
         room = parts[1]
+        if room.lower() == "room" and len(parts) >= 3:
+            room = parts[2]
         join_room(sock, room)
-        send_chat(sock, system_message(f"Joined room {room}"))
+        send_chat(sock, system_message(f"Joined #{room}"))
         return True
 
     # /leave
     if cmd == "/leave":
         join_room(sock, "lobby")
+        return True
+
+    # /whereami
+    if cmd == "/whereami":
+        with state_lock:
+            cur = sock_room.get(sock, "lobby")
+        send_chat(sock, system_message(f"You are in #{cur}"))
         return True
 
     # /pm <user> <message...>
@@ -217,13 +236,16 @@ def handle_command(sock: socket.socket, msg: ChatMessage) -> bool:
         n = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 20
         path = room_log_filename(room)
         out = tail_history(path, n)
-        send_chat(sock, system_message(f"Room history {room} (last {n}):\n{out}"))
+        send_chat(sock, system_message(f"Room history #{room} (last {n}):\n{out}"))
         return True
 
     # unknown
     send_chat(sock, system_message("Unknown command. Type /help"))
     return True
 
+# -------------------------
+# Socket handling
+# -------------------------
 def create_server_socket():
     """Create and return a server socket listening on SERVER_HOST and SERVER_PORT"""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -261,12 +283,19 @@ def handle_client(client_socket: socket.socket):
             if handle_command(client_socket, msg):
                 continue
 
-            # broadcast message thường theo room hiện tại
+            # broadcast message thường theo room hiện tại (HIỂN THỊ kèm tag phòng)
             with state_lock:
                 room = sock_room.get(client_socket, "lobby")
-            broadcast_room(room, msg)
 
-            # ghi log room
+            tagged = ChatMessage(
+                sender=msg.sender,
+                content=f"[#{room}] {msg.content}",
+                timestamp=msg.timestamp
+            )
+            # gửi cho mọi người trong phòng (kể cả người gửi)
+            broadcast_room(room, tagged)
+
+            # ghi log room (KHÔNG tag để history sạch)
             line = f"{msg.timestamp}\t{msg.sender}\t{msg.content}"
             append_history_line(room_log_filename(room), line)
 
@@ -285,7 +314,7 @@ def handle_client(client_socket: socket.socket):
                 rooms[room].discard(client_socket)
 
         if room:
-            broadcast_room(room, system_message(f"{name or 'someone'} disconnected"))
+            broadcast_room(room, system_message(f"{name or 'someone'} disconnected from #{room}"))
         try:
             client_socket.close()
         except Exception:
@@ -300,4 +329,3 @@ if __name__ == "__main__":
         thread = threading.Thread(target=handle_client, args=(client_socket,))
         thread.daemon = True
         thread.start()
-tail_history
