@@ -1,4 +1,4 @@
-# chat_sever.py  — non-OOP, show room tag in chats + system messages
+# chat_sever.py  — non-OOP, room tag + lobby broadcast-to-all
 from typing import List, Dict, Set, Optional
 from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST
 import socket
@@ -28,6 +28,9 @@ rooms: Dict[str, Set[socket.socket]] = {"lobby": set()}
 sock_room: Dict[socket.socket, str] = {}
 
 LOG_DIR = "logs"
+
+# Nếu True: chat ở #lobby sẽ phát TOÀN CỤC (mọi phòng)
+LOBBY_GLOBAL = True
 
 # -------------------------
 # Utilities (server side)
@@ -80,6 +83,17 @@ def broadcast_room(room: str, msg: ChatMessage, exclude: Optional[socket.socket]
     # iterate over copy to avoid mutation issues
     targets = list(rooms.get(room, set()))
     for s in targets:
+        if s is exclude:
+            continue
+        send_chat(s, msg)
+
+def broadcast_all(msg: ChatMessage, exclude: Optional[socket.socket] = None):
+    """Gửi message tới tất cả socket đang online (mọi phòng)."""
+    with state_lock:
+        targets: Set[socket.socket] = set()
+        for members in rooms.values():
+            targets.update(members)
+    for s in list(targets):
         if s is exclude:
             continue
         send_chat(s, msg)
@@ -292,8 +306,12 @@ def handle_client(client_socket: socket.socket):
                 content=f"[#{room}] {msg.content}",
                 timestamp=msg.timestamp
             )
-            # gửi cho mọi người trong phòng (kể cả người gửi)
-            broadcast_room(room, tagged)
+
+            # Nếu ở lobby và bật LOBBY_GLOBAL -> phát TOÀN CỤC
+            if LOBBY_GLOBAL and room == "lobby":
+                broadcast_all(tagged)
+            else:
+                broadcast_room(room, tagged)
 
             # ghi log room (KHÔNG tag để history sạch)
             line = f"{msg.timestamp}\t{msg.sender}\t{msg.content}"
