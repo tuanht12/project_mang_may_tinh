@@ -2,6 +2,8 @@ from enum import Enum
 from pydantic import BaseModel
 import time
 
+from configs import PM_PREFIX
+
 
 class MessageType(str, Enum):
     AUTH = "auth"
@@ -25,6 +27,12 @@ class ChatMessage(BaseModel):
         )
 
         return f"[{human_readable_time}] {self.sender}: {self.content}"
+
+    @property
+    def is_private(self) -> bool:
+        return (
+            self.content.startswith(PM_PREFIX) and len(self.content.split(" ", 2)) == 3
+        )
 
 
 class GenericMessage(BaseModel):

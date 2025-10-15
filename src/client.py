@@ -11,16 +11,13 @@ from schemas import (
 )
 import socket
 import threading
-from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT
+from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT, QUIT_COMMAND
 
-QUIT_COMMAND = "/quit"
-
-
-def receive_messages(client_socket: socket.socket):
+def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
     """
     Listens for incoming messages from the server and prints them.
     """
-    while True:
+    while not stop_event.is_set():
         try:
             # Receive message from the server
             generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
@@ -32,25 +29,30 @@ def receive_messages(client_socket: socket.socket):
             if generic_msg.type == MessageType.CHAT:
                 chat_msg = ChatMessage.model_validate(generic_msg.payload)
                 print(chat_msg.message_string)
+            elif generic_msg.type == MessageType.RESPONSE:
+                server_resp = ServerResponse.model_validate(generic_msg.payload)
+                print(f"[SERVER]: {server_resp.message}")
         except ConnectionResetError:
             print("Connection to the server was lost.")
+            stop_event.set()  # Signal other threads to stop
             break
         except Exception as e:
             print(f"An error occurred: {e}")
-            client_socket.close()
+            stop_event.set()  # Signal other threads to stop
             break
 
 
-def send_messages(client_socket: socket.socket, nickname: str):
+def send_messages(client_socket: socket.socket, nickname: str, stop_event: threading.Event):
     """
     Takes user input and sends it to the server.
     """
-    while True:
+    while not stop_event.is_set():
         try:
             # Get message from user input
             message_text = input("> ")
             if message_text.strip() == QUIT_COMMAND:
                 print("Exiting chat...")
+                stop_event.set()  # Signal other threads to stop
                 break
             if message_text:
                 # Format the message with the nickname
@@ -65,9 +67,11 @@ def send_messages(client_socket: socket.socket, nickname: str):
                 client_socket.send(generic_msg.encoded_bytes)
         except (EOFError, KeyboardInterrupt):
             print("\nDisconnecting...")
+            stop_event.set()  # Signal other threads to stop
             break
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
+            stop_event.set()  # Signal other threads to stop
             break
 
 
@@ -214,12 +218,22 @@ def start_chat_session(client_socket: socket.socket, username: str):
         client_socket: Authenticated socket connection
         username: Authenticated username
     """
-    receive_thread = threading.Thread(target=receive_messages, args=(client_socket,))
+    stop_event = threading.Event()
+    receive_thread = threading.Thread(
+        target=receive_messages, args=(client_socket, stop_event)
+    )
     receive_thread.daemon = True
     receive_thread.start()
 
     # The main thread handles sending messages
-    send_messages(client_socket, username)
+    send_messages(client_socket, username, stop_event)
+
+    stop_event.set()  # Ensure the receive thread is signaled to stop
+    
+    # Close socket after threads have stopped
+    breakpoint()
+    client_socket.close()
+    print("Connection closed.")
 
 
 def start_client():
@@ -232,24 +246,14 @@ def start_client():
     if client_socket is None:
         return
 
-    try:
-        # Perform authentication
-        username = perform_authentication(client_socket)
-        if username is None:
-            print("Exiting...")
-            return
+    # Perform authentication
+    username = perform_authentication(client_socket)
+    if username is None:
+        print("Exiting...")
+        return
 
-        # Start chat session
-        start_chat_session(client_socket, username)
-
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-    finally:
-        # Cleanup
-        client_socket.close()
-        print("Chat session ended.")
+    # Start chat session
+    start_chat_session(client_socket, username)
 
 
 if __name__ == "__main__":
