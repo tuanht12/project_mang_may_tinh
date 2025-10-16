@@ -3,7 +3,14 @@ from typing import List
 
 from pydantic import ValidationError
 from chat_client import ChatClient
-from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST, get_welcome_message
+from configs import (
+    DB_PATH,
+    DEFAULT_BUFFER_SIZE,
+    SERVER_PORT,
+    SERVER_HOST,
+    USERS_CSV,
+    get_welcome_message,
+)
 import socket
 import threading
 from schemas import (
@@ -24,8 +31,6 @@ import os
 clients: List[ChatClient] = []
 # Lock to ensure that the clients list is accessed by only one thread at a time
 clients_lock = threading.Lock()
-DB_PATH = "db"
-USERS_CSV = os.path.join(DB_PATH, "users.csv")  # Path to the CSV file storing user data
 csv_lock = threading.Lock()  # Lock for accessing the CSV file
 
 
