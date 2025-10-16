@@ -90,6 +90,9 @@ def create_connection() -> socket.socket:
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((SERVER_HOST, SERVER_PORT))
         return client_socket
+    except KeyboardInterrupt:
+        print("\nClient exiting...")
+        return None
     except ConnectionRefusedError:
         print("Connection failed. Is the server running?")
         return None
@@ -194,24 +197,28 @@ def perform_authentication(client_socket: socket.socket) -> str:
         str: Username if authentication successful, None otherwise
     """
     while True:
-        # Get user action (login/register)
-        action = get_user_action()
-        if action is None:
+        try:
+            # Get user action (login/register)
+            action = get_user_action()
+            if action is None:
+                return None
+
+            # Get credentials
+            username, password = get_user_credentials()
+            if username is None or password is None:
+                continue
+
+            # Attempt authentication
+            if (
+                authenticate_with_server(client_socket, action, username, password)
+                and action == AuthAction.LOGIN
+            ):
+                return username
+            else:
+                continue
+        except KeyboardInterrupt:
+            print("\nExiting authentication...")
             return None
-
-        # Get credentials
-        username, password = get_user_credentials()
-        if username is None or password is None:
-            continue
-
-        # Attempt authentication
-        if (
-            authenticate_with_server(client_socket, action, username, password)
-            and action == AuthAction.LOGIN
-        ):
-            return username
-        else:
-            continue
 
 
 def start_chat_session(client_socket: socket.socket, username: str):
@@ -222,21 +229,23 @@ def start_chat_session(client_socket: socket.socket, username: str):
         client_socket: Authenticated socket connection
         username: Authenticated username
     """
+    try:
+        stop_event = threading.Event()
+        receive_thread = threading.Thread(
+            target=receive_messages, args=(client_socket, stop_event)
+        )
+        receive_thread.daemon = True
+        receive_thread.start()
 
-    stop_event = threading.Event()
-    receive_thread = threading.Thread(
-        target=receive_messages, args=(client_socket, stop_event)
-    )
-    receive_thread.daemon = True
-    receive_thread.start()
-
-    # The main thread handles sending messages
-    send_messages(client_socket, username, stop_event)
-
-    # Close socket after threads have stopped
-    client_socket.shutdown(socket.SHUT_RDWR)
-    client_socket.close()
-    print("Connection closed.")
+        # The main thread handles sending messages
+        send_messages(client_socket, username, stop_event)
+    except Exception as e:
+        print(f"An error occurred during the chat session: {e}")
+    finally:
+        # Close socket after threads have stopped
+        client_socket.shutdown(socket.SHUT_RDWR)
+        client_socket.close()
+        print("Connection closed.")
 
 
 def start_client():
@@ -252,7 +261,6 @@ def start_client():
     # Perform authentication
     username = perform_authentication(client_socket)
     if username is None:
-        print("Exiting...")
         return
 
     # Start chat session

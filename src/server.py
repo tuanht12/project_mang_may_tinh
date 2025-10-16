@@ -3,7 +3,7 @@ from typing import List
 
 from pydantic import ValidationError
 from chat_client import ChatClient
-from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST
+from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST, get_welcome_message
 import socket
 import threading
 from schemas import (
@@ -204,7 +204,7 @@ def handle_auth(client: ChatClient):
                 ) and not is_username_active(auth_req.username):
                     response = ServerResponse(
                         status=ServerResponseStatus.SUCCESS,
-                        message=f"Login successful. Welcome {auth_req.username}!",
+                        message=get_welcome_message(auth_req.username),
                     )
                     username = auth_req.username
                 elif is_username_active(auth_req.username):
