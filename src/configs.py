@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 # Connection settings
@@ -9,9 +8,9 @@ SERVER_PORT = 65432
 DEFAULT_BUFFER_SIZE = 1024
 
 # Server settings
-CUR_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = "db"
-USERS_CSV = os.path.join(DB_PATH, "users.csv")  # Path to the CSV file storing user data
+CUR_DIR = Path(__file__).parent.parent.resolve()
+DB_PATH = CUR_DIR / "db"
+USERS_CSV = DB_PATH / "users.csv"  # Path to the CSV file storing user data
 
 # Command prefixes
 PM_PREFIX = "/pm "  # Prefix for private messages

@@ -22,7 +22,7 @@ from schemas import (
     ServerResponse,
     ServerResponseStatus,
 )
-from utils import add_new_user_to_db, verify_user_credentials
+from utils import add_new_user_to_db, verify_user_credentials, close_socket
 import pandas as pd
 import os
 
@@ -70,7 +70,7 @@ def send_generic_message_bytes(generic_msg_bytes: bytes, client: ChatClient):
         client.socket.send(generic_msg_bytes)
     except Exception as e:
         print(f"Failed to send message to {client.username}. Error: {e}")
-        client.socket.close()
+        close_socket(client.socket)
         with clients_lock:
             if client in clients:
                 clients.remove(client)
@@ -100,15 +100,10 @@ def handle_private_message(chat_message: ChatMessage, sending_client: ChatClient
             private_generic_msg = GenericMessage(
                 type=MessageType.CHAT, payload=private_msg.model_dump()
             )
-            try:
-                if recipient_client != sending_client:
-                    send_generic_message_bytes(
-                        private_generic_msg.encoded_bytes, recipient_client
-                    )
-            except Exception as e:
-                print(f"Failed to send private message to {recipient}. Error: {e}")
-                recipient_client.socket.close()
-                clients.remove(recipient_client)
+            if recipient_client != sending_client:
+                send_generic_message_bytes(
+                    private_generic_msg.encoded_bytes, recipient_client
+                )
         else:
             error_response = ServerResponse(
                 status=ServerResponseStatus.ERROR,
@@ -272,7 +267,7 @@ def handle_client(client: ChatClient):
         with clients_lock:
             if client in clients:
                 clients.remove(client)
-        client.socket.close()
+        close_socket(client.socket)
 
 
 def main():
@@ -296,6 +291,7 @@ def main():
             thread.start()
         except KeyboardInterrupt:
             print("\nServer shutting down...")
+            close_socket(server_socket)
             break
         except Exception as e:
             print(f"[ERROR] Error accepting client connection: {e}")
