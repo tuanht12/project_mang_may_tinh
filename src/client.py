@@ -218,6 +218,7 @@ def start_chat_session(client_socket: socket.socket, username: str):
         client_socket: Authenticated socket connection
         username: Authenticated username
     """
+
     stop_event = threading.Event()
     receive_thread = threading.Thread(
         target=receive_messages, args=(client_socket, stop_event)
@@ -231,7 +232,7 @@ def start_chat_session(client_socket: socket.socket, username: str):
     stop_event.set()  # Ensure the receive thread is signaled to stop
     
     # Close socket after threads have stopped
-    breakpoint()
+    client_socket.shutdown(socket.SHUT_RDWR)
     client_socket.close()
     print("Connection closed.")
 
