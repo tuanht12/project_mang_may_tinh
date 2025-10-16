@@ -3,7 +3,7 @@ from typing import List
 
 from pydantic import ValidationError
 from chat_client import ChatClient
-from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST
+from configs import DEFAULT_BUFFER_SIZE, SERVER_PORT, SERVER_HOST, get_welcome_message
 import socket
 import threading
 from schemas import (
@@ -59,6 +59,18 @@ def create_server_socket():
     return server_socket
 
 
+def send_generic_message_bytes(generic_msg_bytes: bytes, client: ChatClient):
+    """Sends a generic message (in bytes) to a specific client."""
+    try:
+        client.socket.send(generic_msg_bytes)
+    except Exception as e:
+        print(f"Failed to send message to {client.username}. Error: {e}")
+        client.socket.close()
+        with clients_lock:
+            if client in clients:
+                clients.remove(client)
+
+
 def broadcast(message_bytes: bytes, sending_client: ChatClient):
     """
     Sends a message (in bytes) to all connected clients except the sender.
@@ -66,12 +78,55 @@ def broadcast(message_bytes: bytes, sending_client: ChatClient):
     with clients_lock:
         for client in clients:
             if client != sending_client:
-                try:
-                    client.socket.send(message_bytes)
-                except Exception as e:
-                    print(f"Failed to send message to a client. Error: {e}")
-                    client.socket.close()
-                    clients.remove(client)
+                send_generic_message_bytes(message_bytes, client)
+
+
+def handle_private_message(chat_message: ChatMessage, sending_client: ChatClient):
+    """Handles sending a private message to a specific recipient."""
+    _, recipient, content = chat_message.content.split(" ", 2)
+    with clients_lock:
+        recipient_client = next((c for c in clients if c.username == recipient), None)
+        if recipient_client:
+            private_msg = ChatMessage(
+                sender=chat_message.sender,
+                content=f"(private) {content}",
+                timestamp=chat_message.timestamp,
+            )
+            private_generic_msg = GenericMessage(
+                type=MessageType.CHAT, payload=private_msg.model_dump()
+            )
+            try:
+                if recipient_client != sending_client:
+                    send_generic_message_bytes(
+                        private_generic_msg.encoded_bytes, recipient_client
+                    )
+            except Exception as e:
+                print(f"Failed to send private message to {recipient}. Error: {e}")
+                recipient_client.socket.close()
+                clients.remove(recipient_client)
+        else:
+            error_response = ServerResponse(
+                status=ServerResponseStatus.ERROR,
+                message=f"User '{recipient}' not found or not online.",
+            )
+            error_generic_msg = GenericMessage(
+                type=MessageType.RESPONSE, payload=error_response.model_dump()
+            )
+            send_generic_message_bytes(error_generic_msg.encoded_bytes, sending_client)
+
+
+def handle_chat_message(
+    generic_msg: GenericMessage, sending_client: ChatClient
+) -> None:
+    """
+    Handles incoming messages from clients.
+    """
+    chat_message = ChatMessage.model_validate(generic_msg.payload)
+    print(chat_message.message_string)  # Log to server console
+    if chat_message.is_private:
+        handle_private_message(chat_message, sending_client)
+    else:
+        broadcast(generic_msg.encoded_bytes, sending_client)
 
 
 def handle_chat(client: ChatClient):
@@ -87,9 +142,7 @@ def handle_chat(client: ChatClient):
 
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
             if generic_msg.type == MessageType.CHAT:
-                chat_msg = ChatMessage.model_validate(generic_msg.payload)
-                print(chat_msg.message_string)
-                broadcast(generic_message_bytes, client)
+                handle_chat_message(generic_msg, client)
 
         except ConnectionResetError:
             # Handle the case where the client forcefully closes the connection
@@ -151,7 +204,7 @@ def handle_auth(client: ChatClient):
                 ) and not is_username_active(auth_req.username):
                     response = ServerResponse(
                         status=ServerResponseStatus.SUCCESS,
-                        message=f"Login successful. Welcome {auth_req.username}!",
+                        message=get_welcome_message(auth_req.username),
                     )
                     username = auth_req.username
                 elif is_username_active(auth_req.username):
@@ -217,13 +270,32 @@ def handle_client(client: ChatClient):
         client.socket.close()
 
 
-if __name__ == "__main__":
-    load_users_df()  # Ensure users CSV exists on startup
-    server_socket = create_server_socket()
+def main():
+    """
+    Main server loop to accept incoming client connections.
+    """
+    try:
+        server_socket = create_server_socket()
+    except Exception as e:
+        print(f"[ERROR] Failed to start server: {e}")
+        return
 
     while True:
-        client_socket, addr = server_socket.accept()
-        chat_client = ChatClient(socket=client_socket)
-        thread = threading.Thread(target=handle_client, args=(chat_client,))
-        thread.daemon = True  # Allows main program to exit even if threads are running
-        thread.start()
+        try:
+            client_socket, _ = server_socket.accept()
+            chat_client = ChatClient(socket=client_socket)
+            thread = threading.Thread(target=handle_client, args=(chat_client,))
+            thread.daemon = (
+                True  # Allows main program to exit even if threads are running
+            )
+            thread.start()
+        except KeyboardInterrupt:
+            print("\nServer shutting down...")
+            break
+        except Exception as e:
+            print(f"[ERROR] Error accepting client connection: {e}")
+
+
+if __name__ == "__main__":
+    load_users_df()  # Ensure users CSV exists on startup
+    main()
