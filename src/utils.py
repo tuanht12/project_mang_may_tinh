@@ -36,3 +36,15 @@ def verify_user_credentials(df: pd.DataFrame, username: str, password: str) -> b
         return False
     current_password = str(user_row["password"].iloc[0])
     return current_password == password
+
+
+def close_socket(sock: socket.socket):
+    """Gracefully close a socket."""
+    if sock.fileno() == -1:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:  # Socket already closed or not connected
+        pass
+    finally:
+        sock.close()

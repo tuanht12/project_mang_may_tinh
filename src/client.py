@@ -12,6 +12,7 @@ from schemas import (
 import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT, QUIT_COMMAND
+from utils import close_socket
 
 
 def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
@@ -110,7 +111,8 @@ def get_user_action() -> AuthAction:
     """
     while True:
         action = input(
-            f"Select '1' to {AuthAction.LOGIN.value}, '2' to {AuthAction.REGISTER.value},"
+            f"Select '1' to {AuthAction.LOGIN.value},"
+            f"'2' to {AuthAction.REGISTER.value},"
             f"'{QUIT_COMMAND}' to quit: "
         ).strip()
 
@@ -242,10 +244,7 @@ def start_chat_session(client_socket: socket.socket, username: str):
     except Exception as e:
         print(f"An error occurred during the chat session: {e}")
     finally:
-        # Close socket after threads have stopped
-        client_socket.shutdown(socket.SHUT_RDWR)
-        client_socket.close()
-        print("Connection closed.")
+        print("Chat session ended.")
 
 
 def start_client():
@@ -258,13 +257,18 @@ def start_client():
     if client_socket is None:
         return
 
-    # Perform authentication
-    username = perform_authentication(client_socket)
-    if username is None:
-        return
+    try:
+        # Perform authentication
+        username = perform_authentication(client_socket)
+        if username is None:
+            print("Exiting...")
+            return
 
-    # Start chat session
-    start_chat_session(client_socket, username)
+        # Start chat session
+        start_chat_session(client_socket, username)
+    finally:
+        # Always clean up the connection
+        close_socket(client_socket)
 
 
 if __name__ == "__main__":
