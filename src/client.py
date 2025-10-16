@@ -13,6 +13,7 @@ import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT, QUIT_COMMAND
 
+
 def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
     """
     Listens for incoming messages from the server and prints them.
@@ -34,15 +35,18 @@ def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
                 print(f"[SERVER]: {server_resp.message}")
         except ConnectionResetError:
             print("Connection to the server was lost.")
-            stop_event.set()  # Signal other threads to stop
             break
         except Exception as e:
             print(f"An error occurred: {e}")
-            stop_event.set()  # Signal other threads to stop
             break
+    # Signal other threads to stop
+    if not stop_event.is_set():
+        stop_event.set()
 
 
-def send_messages(client_socket: socket.socket, nickname: str, stop_event: threading.Event):
+def send_messages(
+    client_socket: socket.socket, nickname: str, stop_event: threading.Event
+):
     """
     Takes user input and sends it to the server.
     """
@@ -52,7 +56,6 @@ def send_messages(client_socket: socket.socket, nickname: str, stop_event: threa
             message_text = input("> ")
             if message_text.strip() == QUIT_COMMAND:
                 print("Exiting chat...")
-                stop_event.set()  # Signal other threads to stop
                 break
             if message_text:
                 # Format the message with the nickname
@@ -67,12 +70,13 @@ def send_messages(client_socket: socket.socket, nickname: str, stop_event: threa
                 client_socket.send(generic_msg.encoded_bytes)
         except (EOFError, KeyboardInterrupt):
             print("\nDisconnecting...")
-            stop_event.set()  # Signal other threads to stop
             break
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
-            stop_event.set()  # Signal other threads to stop
             break
+    # Signal other threads to stop
+    if not stop_event.is_set():
+        stop_event.set()  # Signal other threads to stop
 
 
 def create_connection() -> socket.socket:
@@ -229,8 +233,6 @@ def start_chat_session(client_socket: socket.socket, username: str):
     # The main thread handles sending messages
     send_messages(client_socket, username, stop_event)
 
-    stop_event.set()  # Ensure the receive thread is signaled to stop
-    
     # Close socket after threads have stopped
     client_socket.shutdown(socket.SHUT_RDWR)
     client_socket.close()
