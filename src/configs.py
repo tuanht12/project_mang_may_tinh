@@ -15,6 +15,7 @@ USERS_CSV = DB_PATH / "users.csv"  # Path to the CSV file storing user data
 # Command prefixes
 PM_PREFIX = "/pm "  # Prefix for private messages
 QUIT_COMMAND = "/quit"
+SHOW_USERS_COMMAND = "/users"
 
 
 def get_welcome_message(username: str) -> str:
@@ -22,6 +23,7 @@ def get_welcome_message(username: str) -> str:
 
     Instructions:
     - Type your message and hit enter to send it.
+    - Type {SHOW_USERS_COMMAND} to see the list of active users.
     - Use {PM_PREFIX}username your_message to send a private message.
     - Type {QUIT_COMMAND} to exit the chat."""
     return msg.replace("\t", " ").replace("    ", " ").strip()

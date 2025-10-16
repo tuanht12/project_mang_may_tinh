@@ -115,6 +115,22 @@ def handle_private_message(chat_message: ChatMessage, sending_client: ChatClient
             send_generic_message_bytes(error_generic_msg.encoded_bytes, sending_client)
 
 
+def handle_get_active_users(sending_client: ChatClient) -> None:
+    """Handles the /users command to send the list of active usernames
+    to the requesting client."""
+    with clients_lock:
+        active_usernames = [client.username for client in clients if client.username]
+    users_list = "\n".join(active_usernames) if active_usernames else "No users online."
+    server_response = ServerResponse(
+        status=ServerResponseStatus.SUCCESS,
+        message=f"Active users:\n{users_list}",
+    )
+    server_response_msg = GenericMessage(
+        type=MessageType.RESPONSE, payload=server_response.model_dump()
+    )
+    send_generic_message_bytes(server_response_msg.encoded_bytes, sending_client)
+
+
 def handle_chat_message(
     generic_msg: GenericMessage, sending_client: ChatClient
 ) -> None:
@@ -125,6 +141,8 @@ def handle_chat_message(
     print(chat_message.message_string)  # Log to server console
     if chat_message.is_private:
         handle_private_message(chat_message, sending_client)
+    elif chat_message.content.strip() == "/users":
+        handle_get_active_users(sending_client)
     else:
         broadcast(generic_msg.encoded_bytes, sending_client)
 
