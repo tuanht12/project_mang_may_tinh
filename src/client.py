@@ -6,7 +6,7 @@ from schemas import (
     GenericMessage,
     MessageType,
     ServerResponse,
-    ServerResponseStatus,
+    ServerResponseType,
 )
 import socket
 import threading
@@ -66,12 +66,12 @@ def receive_messages(
                 print(chat_msg.message_string)
             elif generic_msg.type == MessageType.RESPONSE:
                 server_resp = ServerResponse.model_validate(generic_msg.payload)
-                print(f"[SERVER]: {server_resp.message}")
+                print(server_resp.message_str)
         except ConnectionResetError:
             print("Connection to the server was lost.")
             should_reconnect = True
             break
-        except Exception as e:
+        except Exception:
             break
     # Signal other threads to stop
     if should_reconnect and not reconnect_event.is_set():
@@ -163,15 +163,15 @@ def authenticate_with_server(
     client_socket: socket.socket, action: AuthAction, client_credentials: dict
 ) -> tuple[bool, socket.socket]:
     """
-    Sends authentication request to server and handles response with reconnection logic.
-
+    Attempts to authenticate with the server, with reconnection logic.
     Args:
         client_socket: Socket connection to server
         action: Login or register action
         client_credentials: Dictionary with 'username' and 'password' keys
 
     Returns:
-        tuple[bool, socket.socket]: (success, socket) - success status and potentially new socket
+        tuple[bool, socket.socket]: (success, socket) -
+        success status and potentially new socket
     """
     current_socket = client_socket
 
@@ -196,7 +196,8 @@ def authenticate_with_server(
                 return False, None
             sleep_time = SLEEP_BETWEEN_RETRIES**attempt
             print(
-                f"Attempt {attempt}/{MAX_RECONNECTION_ATTEMPTS} in {sleep_time} seconds..."
+                f"Attempt {attempt}/{MAX_RECONNECTION_ATTEMPTS} "
+                f"in {sleep_time} seconds..."
             )
             time.sleep(sleep_time)
             new_socket = create_connection()
@@ -215,10 +216,10 @@ def authenticate_with_server(
     resp_generic = GenericMessage.model_validate_json(response_bytes)
     if resp_generic.type == MessageType.RESPONSE:
         server_resp = ServerResponse.model_validate(resp_generic.payload)
-        print(f"[SERVER]: {server_resp.message}")
+        print(server_resp.message_str)
 
         success = (
-            server_resp.status == ServerResponseStatus.SUCCESS
+            server_resp.status == ServerResponseType.SUCCESS
             and action == AuthAction.LOGIN
         )
         return success, current_socket
@@ -237,7 +238,8 @@ def perform_authentication(
         client_credentials: Dictionary to store credentials
 
     Returns:
-        tuple[str, socket.socket]: (username, socket) if successful, (None, socket) otherwise
+        tuple[str, socket.socket]: (username, socket) if successful,
+        (None, socket) otherwise
     """
     current_socket = client_socket
 
