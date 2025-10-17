@@ -1,4 +1,3 @@
-import getpass
 import time
 from schemas import (
     AuthAction,
@@ -12,7 +11,7 @@ from schemas import (
 import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT, QUIT_COMMAND
-from utils import close_socket
+from utils import close_socket, get_user_credentials, request_user_login_register
 from queue import Queue
 
 MAX_RECONNECTION_ATTEMPTS = 3
@@ -29,10 +28,8 @@ def attempt_reconnection(client_credentials):
         if new_socket is None:
             time.sleep(SLEEP_BETWEEN_RETRIES * attempt)
             continue
-        username = client_credentials["username"]
-        password = client_credentials["password"]
         # Try to re-authenticate
-        if authenticate_with_server(new_socket, AuthAction.LOGIN, username, password):
+        if authenticate_with_server(new_socket, AuthAction.LOGIN, client_credentials):
             print("Reconnected successfully!")
             return new_socket
         else:
@@ -55,9 +52,8 @@ def receive_messages(
         try:
             # Receive message from the server
             generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
+            # If no data is received, the server has closed the connection
             if not generic_message_bytes and not reconnect_event.is_set():
-                # If the server closes the connection, recv returns an empty string
-                print("Server has closed the connection.")
                 reconnect_event.set()  # Signal that reconnection is needed
                 break
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
@@ -156,50 +152,8 @@ def create_connection() -> socket.socket:
         return None
 
 
-def get_user_action() -> AuthAction:
-    """
-    Prompts user to select login or register action.
-
-    Returns:
-        AuthAction: Selected action or None if user wants to quit
-    """
-    while True:
-        action = input(
-            f"Select '1' to {AuthAction.LOGIN.value},"
-            f"'2' to {AuthAction.REGISTER.value},"
-            f"'{QUIT_COMMAND}' to quit: "
-        ).strip()
-
-        if action == QUIT_COMMAND:
-            return None
-
-        if action == "1":
-            return AuthAction.LOGIN
-        elif action == "2":
-            return AuthAction.REGISTER
-        else:
-            print("Invalid option. Please choose '1' or '2'.")
-
-
-def get_user_credentials() -> tuple[str, str]:
-    """
-    Prompts user for username and password.
-
-    Returns:
-        tuple[str, str]: (username, password) or (None, None) if invalid
-    """
-    username = input("Enter username: ").strip()
-    password = getpass.getpass("Enter password: ")
-
-    if not username or not password:
-        print("Username and password cannot be empty.")
-        return None, None
-
-    return username, password
-
-
 def authenticate_with_server(
-    client_socket: socket.socket, action: AuthAction, username: str, password: str
+    client_socket: socket.socket, action: AuthAction, client_credentials: dict
 ) -> bool:
     """
     Sends authentication request to server and handles response.
@@ -207,15 +161,18 @@ def authenticate_with_server(
     Args:
         client_socket: Socket connection to server
         action: Login or register action
-        username: User's username
-        password: User's password
+        client_credentials: Dictionary with 'username' and 'password' keys
 
     Returns:
         bool: True if authentication successful, False otherwise
     """
     try:
         # Send authentication request
-        auth_req = AuthRequest(action=action, username=username, password=password)
+        auth_req = AuthRequest(
+            action=action,
+            username=client_credentials["username"],
+            password=client_credentials["password"],
+        )
         auth_msg = GenericMessage(type=MessageType.AUTH, payload=auth_req.model_dump())
         client_socket.send(auth_msg.encoded_bytes)
 
@@ -257,7 +214,7 @@ def perform_authentication(
     while True:
         try:
             # Get user action (login/register)
-            action = get_user_action()
+            action = request_user_login_register()
             if action is None:
                 return None
 
@@ -265,14 +222,13 @@ def perform_authentication(
             username, password = get_user_credentials()
             if username is None or password is None:
                 continue
-
+            client_credentials["username"] = username
+            client_credentials["password"] = password
             # Attempt authentication
             if (
-                authenticate_with_server(client_socket, action, username, password)
+                authenticate_with_server(client_socket, action, client_credentials)
                 and action == AuthAction.LOGIN
             ):
-                client_credentials["username"] = username
-                client_credentials["password"] = password
                 return username
             else:
                 continue
@@ -291,7 +247,6 @@ def start_chat_session(client_socket: socket.socket, client_credentials: dict):
     """
     message_buffer = Queue()
     while True:
-        username = client_credentials["username"]
         stop_event = threading.Event()
         reconnect_event = threading.Event()
         receive_thread = threading.Thread(
@@ -302,7 +257,11 @@ def start_chat_session(client_socket: socket.socket, client_credentials: dict):
 
         # The main thread handles sending messages
         send_messages(
-            client_socket, username, stop_event, reconnect_event, message_buffer
+            client_socket,
+            client_credentials["username"],
+            stop_event,
+            reconnect_event,
+            message_buffer,
         )
         # User wants to quit
         if stop_event.is_set() and not reconnect_event.is_set():
@@ -319,7 +278,6 @@ def start_chat_session(client_socket: socket.socket, client_credentials: dict):
                 print("Reconnected. You can continue chatting.")
                 continue
         else:
-            print("Chat session ended.")
             break
 
 
