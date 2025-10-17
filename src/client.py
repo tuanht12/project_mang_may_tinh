@@ -13,6 +13,7 @@ import socket
 import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT, QUIT_COMMAND
 from utils import close_socket
+from queue import Queue
 
 MAX_RECONNECTION_ATTEMPTS = 3
 SLEEP_BETWEEN_RETRIES = 2  # seconds
@@ -98,7 +99,7 @@ def send_messages(
     nickname: str,
     stop_event: threading.Event,
     reconnect_event: threading.Event,
-    message_buffer: list,
+    message_buffer: Queue,
 ):
     """
     Takes user input and sends it to the server.
@@ -107,15 +108,15 @@ def send_messages(
     while not stop_event.is_set():
         try:
             # Get message from user input
-            for message_text in message_buffer:
+            while not message_buffer.empty():
+                message_text = message_buffer.get()
                 send_message_text(message_text, client_socket, nickname)
-            message_buffer.clear()
             message_text = input("> ")
             if message_text.strip() == QUIT_COMMAND:
                 print("Exiting chat...")
                 break
             if reconnect_event.is_set():
-                message_buffer.append(message_text)
+                message_buffer.put(message_text)
                 break
             send_message_text(message_text, client_socket, nickname)
         except (EOFError, KeyboardInterrupt):
@@ -288,7 +289,7 @@ def start_chat_session(client_socket: socket.socket, client_credentials: dict):
         client_socket: Authenticated socket connection
         username: Authenticated username
     """
-    message_buffer = []
+    message_buffer = Queue()
     while True:
         username = client_credentials["username"]
         stop_event = threading.Event()
