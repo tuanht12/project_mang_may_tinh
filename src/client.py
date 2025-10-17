@@ -14,8 +14,39 @@ import threading
 from configs import DEFAULT_BUFFER_SIZE, SERVER_HOST, SERVER_PORT, QUIT_COMMAND
 from utils import close_socket
 
+MAX_RECONNECTION_ATTEMPTS = 3
+SLEEP_BETWEEN_RETRIES = 2  # seconds
 
-def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
+
+def attempt_reconnection(client_credentials):
+    """Attempt to reconnect to server"""
+    for attempt in range(1, MAX_RECONNECTION_ATTEMPTS + 1):
+        print(f"Reconnection attempt {attempt}/{MAX_RECONNECTION_ATTEMPTS}")
+
+        # Try to create new connection
+        new_socket = create_connection()
+        if new_socket is None:
+            time.sleep(SLEEP_BETWEEN_RETRIES)
+            continue
+        username = client_credentials["username"]
+        password = client_credentials["password"]
+        # Try to re-authenticate
+        if authenticate_with_server(new_socket, AuthAction.LOGIN, username, password):
+            print("Reconnected successfully!")
+            return new_socket
+        else:
+            close_socket(new_socket)
+            time.sleep(SLEEP_BETWEEN_RETRIES)
+
+    print("Failed to reconnect after all attempts")
+    return None
+
+
+def receive_messages(
+    client_socket: socket.socket,
+    stop_event: threading.Event,
+    reconnect_event: threading.Event,
+):
     """
     Listens for incoming messages from the server and prints them.
     """
@@ -23,9 +54,10 @@ def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
         try:
             # Receive message from the server
             generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
-            if not generic_message_bytes:
+            if not generic_message_bytes and not reconnect_event.is_set():
                 # If the server closes the connection, recv returns an empty string
-                print("Disconnected from server.")
+                print("Server has closed the connection.")
+                reconnect_event.set()  # Signal that reconnection is needed
                 break
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
             if generic_msg.type == MessageType.CHAT:
@@ -36,6 +68,7 @@ def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
                 print(f"[SERVER]: {server_resp.message}")
         except ConnectionResetError:
             print("Connection to the server was lost.")
+            reconnect_event.set()  # Signal that reconnection is needed
             break
         except Exception as e:
             print(f"An error occurred: {e}")
@@ -45,32 +78,52 @@ def receive_messages(client_socket: socket.socket, stop_event: threading.Event):
         stop_event.set()
 
 
+def send_message_text(message_text: str, client_socket: socket.socket, nickname: str):
+    """Send a single message to the server."""
+    if message_text:
+        # Format the message with the nickname
+        chat_msg = ChatMessage(
+            sender=nickname, content=message_text, timestamp=int(time.time())
+        )
+        generic_msg = GenericMessage(
+            type=MessageType.CHAT, payload=chat_msg.model_dump()
+        )
+
+        # Send the message to the server
+        client_socket.send(generic_msg.encoded_bytes)
+
+
 def send_messages(
-    client_socket: socket.socket, nickname: str, stop_event: threading.Event
+    client_socket: socket.socket,
+    nickname: str,
+    stop_event: threading.Event,
+    reconnect_event: threading.Event,
+    message_buffer: list,
 ):
     """
     Takes user input and sends it to the server.
     """
+
     while not stop_event.is_set():
         try:
             # Get message from user input
+            for message_text in message_buffer:
+                send_message_text(message_text, client_socket, nickname)
+            message_buffer.clear()
             message_text = input("> ")
             if message_text.strip() == QUIT_COMMAND:
                 print("Exiting chat...")
                 break
-            if message_text:
-                # Format the message with the nickname
-                chat_msg = ChatMessage(
-                    sender=nickname, content=message_text, timestamp=int(time.time())
-                )
-                generic_msg = GenericMessage(
-                    type=MessageType.CHAT, payload=chat_msg.model_dump()
-                )
-
-                # Send the message to the server
-                client_socket.send(generic_msg.encoded_bytes)
+            if reconnect_event.is_set():
+                message_buffer.append(message_text)
+                break
+            send_message_text(message_text, client_socket, nickname)
         except (EOFError, KeyboardInterrupt):
             print("\nDisconnecting...")
+            break
+        except (ConnectionResetError, BrokenPipeError):
+            print("Connection lost during send")
+            reconnect_event.set()
             break
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
@@ -188,7 +241,9 @@ def authenticate_with_server(
         return False
 
 
-def perform_authentication(client_socket: socket.socket) -> str:
+def perform_authentication(
+    client_socket: socket.socket, client_credentials: dict
+) -> str:
     """
     Handles the complete authentication process.
 
@@ -215,6 +270,8 @@ def perform_authentication(client_socket: socket.socket) -> str:
                 authenticate_with_server(client_socket, action, username, password)
                 and action == AuthAction.LOGIN
             ):
+                client_credentials["username"] = username
+                client_credentials["password"] = password
                 return username
             else:
                 continue
@@ -223,7 +280,7 @@ def perform_authentication(client_socket: socket.socket) -> str:
             return None
 
 
-def start_chat_session(client_socket: socket.socket, username: str):
+def start_chat_session(client_socket: socket.socket, client_credentials: dict):
     """
     Starts the chat session with separate threads for sending and receiving.
 
@@ -231,23 +288,41 @@ def start_chat_session(client_socket: socket.socket, username: str):
         client_socket: Authenticated socket connection
         username: Authenticated username
     """
-    try:
+    message_buffer = []
+    while True:
+        username = client_credentials["username"]
         stop_event = threading.Event()
+        reconnect_event = threading.Event()
         receive_thread = threading.Thread(
-            target=receive_messages, args=(client_socket, stop_event)
+            target=receive_messages, args=(client_socket, stop_event, reconnect_event)
         )
         receive_thread.daemon = True
         receive_thread.start()
 
         # The main thread handles sending messages
-        send_messages(client_socket, username, stop_event)
-    except Exception as e:
-        print(f"An error occurred during the chat session: {e}")
-    finally:
-        print("Chat session ended.")
+        send_messages(
+            client_socket, username, stop_event, reconnect_event, message_buffer
+        )
+        # User wants to quit
+        if stop_event.is_set() and not reconnect_event.is_set():
+            print("Chat session ended.")
+            break
+        elif reconnect_event.is_set():
+            print("Attempting to reconnect...")
+            close_socket(client_socket)
+            client_socket = attempt_reconnection(client_credentials)
+            if client_socket is None:
+                print("Could not reconnect. Exiting chat session.")
+                break
+            else:
+                print("Reconnected. You can continue chatting.")
+                continue
+        else:
+            print("Chat session ended.")
+            break
 
 
-def start_client():
+def run():
     """
     Main entry point for the chat client.
     Coordinates connection, authentication, and chat session.
@@ -256,20 +331,20 @@ def start_client():
     client_socket = create_connection()
     if client_socket is None:
         return
-
+    client_credentials = {"username": None, "password": None}
     try:
         # Perform authentication
-        username = perform_authentication(client_socket)
+        username = perform_authentication(client_socket, client_credentials)
         if username is None:
             print("Exiting...")
             return
 
         # Start chat session
-        start_chat_session(client_socket, username)
+        start_chat_session(client_socket, client_credentials)
     finally:
         # Always clean up the connection
         close_socket(client_socket)
 
 
 if __name__ == "__main__":
-    start_client()
+    run()
