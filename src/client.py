@@ -6,7 +6,7 @@ from schemas import (
     GenericMessage,
     MessageType,
     ServerResponse,
-    ServerResponseStatus,
+    ServerResponseType,
 )
 import socket
 import threading
@@ -66,7 +66,7 @@ def receive_messages(
                 print(chat_msg.message_string)
             elif generic_msg.type == MessageType.RESPONSE:
                 server_resp = ServerResponse.model_validate(generic_msg.payload)
-                print(f"[SERVER]: {server_resp.message}")
+                print(server_resp.message_str)
         except ConnectionResetError:
             print("Connection to the server was lost.")
             should_reconnect = True
@@ -216,10 +216,10 @@ def authenticate_with_server(
     resp_generic = GenericMessage.model_validate_json(response_bytes)
     if resp_generic.type == MessageType.RESPONSE:
         server_resp = ServerResponse.model_validate(resp_generic.payload)
-        print(f"[SERVER]: {server_resp.message}")
+        print(server_resp.message_str)
 
         success = (
-            server_resp.status == ServerResponseStatus.SUCCESS
+            server_resp.status == ServerResponseType.SUCCESS
             and action == AuthAction.LOGIN
         )
         return success, current_socket

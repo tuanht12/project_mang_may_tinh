@@ -20,7 +20,7 @@ from schemas import (
     GenericMessage,
     MessageType,
     ServerResponse,
-    ServerResponseStatus,
+    ServerResponseType,
 )
 from utils import add_new_user_to_db, verify_user_credentials, close_socket
 import pandas as pd
@@ -106,8 +106,8 @@ def handle_private_message(chat_message: ChatMessage, sending_client: ChatClient
                 )
         else:
             error_response = ServerResponse(
-                status=ServerResponseStatus.ERROR,
-                message=f"User '{recipient}' not found or not online.",
+                status=ServerResponseType.ERROR,
+                content=f"User '{recipient}' not found or not online.",
             )
             error_generic_msg = GenericMessage(
                 type=MessageType.RESPONSE, payload=error_response.model_dump()
@@ -122,8 +122,8 @@ def handle_get_active_users(sending_client: ChatClient) -> None:
         active_usernames = [client.username for client in clients if client.username]
     users_list = "\n".join(active_usernames) if active_usernames else "No users online."
     server_response = ServerResponse(
-        status=ServerResponseStatus.SUCCESS,
-        message=f"Active users:\n{users_list}",
+        status=ServerResponseType.SUCCESS,
+        content=f"Active users:\n{users_list}",
     )
     server_response_msg = GenericMessage(
         type=MessageType.RESPONSE, payload=server_response.model_dump()
@@ -169,12 +169,29 @@ def handle_chat(client: ChatClient):
         except Exception as e:
             print(f"[ERROR] {e}")
             break
+    notice_user_presence(client.username, online=False)
 
 
 def is_username_active(username: str) -> bool:
     """Check if a username is already active in the chat."""
     with clients_lock:
         return any(client.username == username for client in clients)
+
+
+def notice_user_presence(username: str, online: bool):
+    """Notify all clients about a user's presence change."""
+    status = "online" if online else "offline"
+    notification = ServerResponse(
+        status=ServerResponseType.INFO,
+        content=f"User '{username}' is now {status}.",
+    )
+    notification_msg = GenericMessage(
+        type=MessageType.RESPONSE, payload=notification.model_dump()
+    )
+    with clients_lock:
+        for client in clients:
+            if client.username != username:
+                send_generic_message_bytes(notification_msg.encoded_bytes, client)
 
 
 def handle_auth(client: ChatClient):
@@ -204,8 +221,8 @@ def handle_auth(client: ChatClient):
             if auth_req.action == AuthAction.REGISTER:
                 if auth_req.username in users_df["username"].values:
                     response = ServerResponse(
-                        status=ServerResponseStatus.ERROR,
-                        message="Username already exists.",
+                        status=ServerResponseType.ERROR,
+                        content="Username already exists.",
                     )
                 else:
                     users_df = add_new_user_to_db(
@@ -213,27 +230,27 @@ def handle_auth(client: ChatClient):
                     )
                     save_users_df(users_df)
                     response = ServerResponse(
-                        status=ServerResponseStatus.SUCCESS,
-                        message="Registration successful. Please log in.",
+                        status=ServerResponseType.SUCCESS,
+                        content="Registration successful. Please log in.",
                     )
             elif auth_req.action == AuthAction.LOGIN:
                 if verify_user_credentials(
                     users_df, auth_req.username, auth_req.password
                 ) and not is_username_active(auth_req.username):
                     response = ServerResponse(
-                        status=ServerResponseStatus.SUCCESS,
-                        message=get_welcome_message(auth_req.username),
+                        status=ServerResponseType.SUCCESS,
+                        content=get_welcome_message(auth_req.username),
                     )
                     username = auth_req.username
                 elif is_username_active(auth_req.username):
                     response = ServerResponse(
-                        status=ServerResponseStatus.ERROR,
-                        message="This user is already logged in.",
+                        status=ServerResponseType.ERROR,
+                        content="This user is already logged in.",
                     )
                 else:
                     response = ServerResponse(
-                        status=ServerResponseStatus.ERROR,
-                        message="Invalid username or password.",
+                        status=ServerResponseType.ERROR,
+                        content="Invalid username or password.",
                     )
             # Send response back to client
             response_msg = GenericMessage(
@@ -242,14 +259,15 @@ def handle_auth(client: ChatClient):
             client.socket.send(response_msg.encoded_bytes)
 
             if (
-                response.status == ServerResponseStatus.SUCCESS
+                response.status == ServerResponseType.SUCCESS
                 and auth_req.action == AuthAction.LOGIN
             ):
+                notice_user_presence(username, online=True)
                 return username
         except (ValidationError, json.JSONDecodeError):
             response = ServerResponse(
-                status=ServerResponseStatus.ERROR,
-                message="Invalid authentication request format.",
+                status=ServerResponseType.ERROR,
+                content="Invalid authentication request format.",
             )
             response_msg = GenericMessage(
                 type=MessageType.RESPONSE, payload=response.model_dump()

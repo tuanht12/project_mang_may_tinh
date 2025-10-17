@@ -2,7 +2,7 @@ from enum import Enum
 from pydantic import BaseModel
 import time
 
-from configs import PM_PREFIX
+from configs import PM_PREFIX, SERVER_NAME
 
 
 class MessageType(str, Enum):
@@ -22,6 +22,9 @@ class ChatMessage(BaseModel):
 
     @property
     def message_string(self) -> str:
+        if self.sender == SERVER_NAME:
+            return f"[{self.sender}]: {self.content}"
+
         human_readable_time = time.strftime(
             "%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp)
         )
@@ -57,9 +60,14 @@ class AuthRequest(BaseModel):
 
 class ServerResponse(BaseModel):
     status: str  # 'success' or 'error'
-    message: str
+    content: str
+
+    @property
+    def message_str(self) -> str:
+        return "[SERVER] " + self.content
 
 
-class ServerResponseStatus(str, Enum):
+class ServerResponseType(str, Enum):
     SUCCESS = "success"
     ERROR = "error"
+    INFO = "info"
