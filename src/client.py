@@ -22,19 +22,22 @@ def attempt_reconnection(client_credentials):
     """Attempt to reconnect to server"""
     for attempt in range(1, MAX_RECONNECTION_ATTEMPTS + 1):
         print(f"Reconnection attempt {attempt}/{MAX_RECONNECTION_ATTEMPTS}")
-
+        sleep_time = SLEEP_BETWEEN_RETRIES**attempt
         # Try to create new connection
         new_socket = create_connection()
         if new_socket is None:
-            time.sleep(SLEEP_BETWEEN_RETRIES * attempt)
+            time.sleep(sleep_time)
             continue
         # Try to re-authenticate
-        if authenticate_with_server(new_socket, AuthAction.LOGIN, client_credentials):
+        is_passed, _ = authenticate_with_server(
+            new_socket, AuthAction.LOGIN, client_credentials
+        )
+        if is_passed:
             print("Reconnected successfully!")
             return new_socket
         else:
             close_socket(new_socket)
-            time.sleep(SLEEP_BETWEEN_RETRIES * attempt)
+            time.sleep(sleep_time)
 
     print("Failed to reconnect after all attempts")
     return None
@@ -48,13 +51,14 @@ def receive_messages(
     """
     Listens for incoming messages from the server and prints them.
     """
+    should_reconnect = False
     while not stop_event.is_set():
         try:
             # Receive message from the server
             generic_message_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
             # If no data is received, the server has closed the connection
-            if not generic_message_bytes and not reconnect_event.is_set():
-                reconnect_event.set()  # Signal that reconnection is needed
+            if not generic_message_bytes:
+                should_reconnect = True
                 break
             generic_msg = GenericMessage.model_validate_json(generic_message_bytes)
             if generic_msg.type == MessageType.CHAT:
@@ -65,12 +69,13 @@ def receive_messages(
                 print(f"[SERVER]: {server_resp.message}")
         except ConnectionResetError:
             print("Connection to the server was lost.")
-            reconnect_event.set()  # Signal that reconnection is needed
+            should_reconnect = True
             break
         except Exception as e:
-            print(f"An error occurred: {e}")
             break
     # Signal other threads to stop
+    if should_reconnect and not reconnect_event.is_set():
+        reconnect_event.set()
     if not stop_event.is_set():
         stop_event.set()
 
@@ -100,7 +105,7 @@ def send_messages(
     """
     Takes user input and sends it to the server.
     """
-
+    should_reconnect = False
     while not stop_event.is_set():
         try:
             # Get message from user input
@@ -120,12 +125,14 @@ def send_messages(
             break
         except (ConnectionResetError, BrokenPipeError):
             print("Connection lost during send")
-            reconnect_event.set()
+            should_reconnect = True
             break
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
             break
     # Signal other threads to stop
+    if should_reconnect and not reconnect_event.is_set():
+        reconnect_event.set()
     if not stop_event.is_set():
         stop_event.set()  # Signal other threads to stop
 
@@ -154,9 +161,9 @@ def create_connection() -> socket.socket:
 
 def authenticate_with_server(
     client_socket: socket.socket, action: AuthAction, client_credentials: dict
-) -> bool:
+) -> tuple[bool, socket.socket]:
     """
-    Sends authentication request to server and handles response.
+    Sends authentication request to server and handles response with reconnection logic.
 
     Args:
         client_socket: Socket connection to server
@@ -164,77 +171,112 @@ def authenticate_with_server(
         client_credentials: Dictionary with 'username' and 'password' keys
 
     Returns:
-        bool: True if authentication successful, False otherwise
+        tuple[bool, socket.socket]: (success, socket) - success status and potentially new socket
     """
-    try:
-        # Send authentication request
-        auth_req = AuthRequest(
-            action=action,
-            username=client_credentials["username"],
-            password=client_credentials["password"],
-        )
-        auth_msg = GenericMessage(type=MessageType.AUTH, payload=auth_req.model_dump())
-        client_socket.send(auth_msg.encoded_bytes)
+    current_socket = client_socket
 
-        # Receive and process response
-        response_bytes = client_socket.recv(DEFAULT_BUFFER_SIZE)
-        if not response_bytes:
-            print("Server disconnected during authentication.")
-            return False
+    auth_req = AuthRequest(
+        action=action,
+        username=client_credentials["username"],
+        password=client_credentials["password"],
+    )
+    auth_msg = GenericMessage(type=MessageType.AUTH, payload=auth_req.model_dump())
 
-        resp_generic = GenericMessage.model_validate_json(response_bytes)
-        if resp_generic.type == MessageType.RESPONSE:
-            server_resp = ServerResponse.model_validate(resp_generic.payload)
-            print(f"[SERVER]: {server_resp.message}")
-
-            return (
-                server_resp.status == ServerResponseStatus.SUCCESS
-                and action == AuthAction.LOGIN
+    for attempt in range(1, MAX_RECONNECTION_ATTEMPTS + 1):
+        try:
+            current_socket.send(auth_msg.encoded_bytes)
+            response_bytes = current_socket.recv(DEFAULT_BUFFER_SIZE)
+            if not response_bytes:
+                print("Server disconnected during authentication.")
+                raise ConnectionResetError("Server disconnected")
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            close_socket(current_socket)
+            if attempt == MAX_RECONNECTION_ATTEMPTS:
+                print("Failed to authenticate after all reconnection attempts")
+                return False, None
+            sleep_time = SLEEP_BETWEEN_RETRIES**attempt
+            print(
+                f"Attempt {attempt}/{MAX_RECONNECTION_ATTEMPTS} in {sleep_time} seconds..."
             )
+            time.sleep(sleep_time)
+            new_socket = create_connection()
+            if new_socket is None:
+                print(f"Failed to reconnect for authentication attempt {attempt}")
+                continue
+            else:
+                print("Reconnected successfully")
+                current_socket = new_socket
+                continue
+        except Exception as e:
+            print(f"Error processing authentication response: {e}")
+            return False, None
+        break  # Exit loop if no exception occurred
 
-        return False
+    resp_generic = GenericMessage.model_validate_json(response_bytes)
+    if resp_generic.type == MessageType.RESPONSE:
+        server_resp = ServerResponse.model_validate(resp_generic.payload)
+        print(f"[SERVER]: {server_resp.message}")
 
-    except Exception as e:
-        print(f"An error occurred during authentication: {e}")
-        return False
+        success = (
+            server_resp.status == ServerResponseStatus.SUCCESS
+            and action == AuthAction.LOGIN
+        )
+        return success, current_socket
+
+    return False, current_socket
 
 
 def perform_authentication(
     client_socket: socket.socket, client_credentials: dict
-) -> str:
+) -> tuple[str, socket.socket]:
     """
     Handles the complete authentication process.
 
     Args:
         client_socket: Socket connection to server
+        client_credentials: Dictionary to store credentials
 
     Returns:
-        str: Username if authentication successful, None otherwise
+        tuple[str, socket.socket]: (username, socket) if successful, (None, socket) otherwise
     """
+    current_socket = client_socket
+
     while True:
         try:
             # Get user action (login/register)
             action = request_user_login_register()
             if action is None:
-                return None
+                return None, current_socket
 
             # Get credentials
             username, password = get_user_credentials()
             if username is None or password is None:
                 continue
+
+            # Store credentials for authentication
             client_credentials["username"] = username
             client_credentials["password"] = password
-            # Attempt authentication
-            if (
-                authenticate_with_server(client_socket, action, client_credentials)
-                and action == AuthAction.LOGIN
-            ):
-                return username
+
+            # Attempt authentication with reconnection logic
+            success, new_socket = authenticate_with_server(
+                current_socket, action, client_credentials
+            )
+
+            if new_socket is None:
+                # Authentication failed due to connection issues
+                return None, None
+
+            current_socket = new_socket  # Update socket in case it was reconnected
+
+            if success and action == AuthAction.LOGIN:
+                return username, current_socket
             else:
+                # Authentication failed, but socket is still valid - continue trying
                 continue
+
         except KeyboardInterrupt:
             print("\nExiting authentication...")
-            return None
+            return None, current_socket
 
 
 def start_chat_session(client_socket: socket.socket, client_credentials: dict):
@@ -293,8 +335,10 @@ def run():
     client_credentials = {"username": None, "password": None}
     try:
         # Perform authentication
-        username = perform_authentication(client_socket, client_credentials)
-        if username is None:
+        username, client_socket = perform_authentication(
+            client_socket, client_credentials
+        )
+        if username is None or client_socket is None:
             print("Exiting...")
             return
 
@@ -302,7 +346,8 @@ def run():
         start_chat_session(client_socket, client_credentials)
     finally:
         # Always clean up the connection
-        close_socket(client_socket)
+        if client_socket:
+            close_socket(client_socket)
 
 
 if __name__ == "__main__":
