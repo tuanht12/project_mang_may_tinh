@@ -27,7 +27,7 @@ def attempt_reconnection(client_credentials):
         # Try to create new connection
         new_socket = create_connection()
         if new_socket is None:
-            time.sleep(SLEEP_BETWEEN_RETRIES)
+            time.sleep(SLEEP_BETWEEN_RETRIES * attempt)
             continue
         username = client_credentials["username"]
         password = client_credentials["password"]
@@ -37,7 +37,7 @@ def attempt_reconnection(client_credentials):
             return new_socket
         else:
             close_socket(new_socket)
-            time.sleep(SLEEP_BETWEEN_RETRIES)
+            time.sleep(SLEEP_BETWEEN_RETRIES * attempt)
 
     print("Failed to reconnect after all attempts")
     return None
