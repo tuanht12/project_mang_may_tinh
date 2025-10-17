@@ -1,6 +1,10 @@
+import getpass
 import socket
 
 import pandas as pd
+
+from configs import QUIT_COMMAND
+from schemas import AuthAction
 
 
 def get_local_ip():
@@ -48,3 +52,45 @@ def close_socket(sock: socket.socket):
         pass
     finally:
         sock.close()
+
+
+def request_user_login_register() -> AuthAction:
+    """
+    Prompts user to select login or register action.
+
+    Returns:
+        AuthAction: Selected action or None if user wants to quit
+    """
+    while True:
+        action = input(
+            f"Select '1' to {AuthAction.LOGIN.value},"
+            f"'2' to {AuthAction.REGISTER.value},"
+            f"'{QUIT_COMMAND}' to quit: "
+        ).strip()
+
+        if action == QUIT_COMMAND:
+            return None
+
+        if action == "1":
+            return AuthAction.LOGIN
+        elif action == "2":
+            return AuthAction.REGISTER
+        else:
+            print("Invalid option. Please choose '1' or '2'.")
+
+
+def get_user_credentials() -> tuple[str, str]:
+    """
+    Prompts user for username and password.
+
+    Returns:
+        tuple[str, str]: (username, password) or (None, None) if invalid
+    """
+    username = input("Enter username: ").strip()
+    password = getpass.getpass("Enter password: ")
+
+    if not username or not password:
+        print("Username and password cannot be empty.")
+        return None, None
+
+    return username, password
