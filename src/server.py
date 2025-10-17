@@ -306,10 +306,11 @@ def handle_client(client: ChatClient):
         close_socket(client.socket)
 
 
-def main():
+def run():
     """
     Main server loop to accept incoming client connections.
     """
+    load_users_df()  # Ensure users CSV exists on startup
     try:
         server_socket = create_server_socket()
     except Exception as e:
@@ -334,5 +335,4 @@ def main():
 
 
 if __name__ == "__main__":
-    load_users_df()  # Ensure users CSV exists on startup
-    main()
+    run()
