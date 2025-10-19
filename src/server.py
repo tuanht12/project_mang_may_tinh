@@ -304,7 +304,7 @@ _RECONNECT_LOCK = threading.Lock()
 _CURRENT_SOCKET: socket.socket | None = None
 _LAST_AUTH: dict | None = None   # {'username': str, 'password': str}
 _RETRY_BACKOFFS = [0.5, 1, 2, 3, 5, 8, 13]  # giây
-_OUTBOX: list[str] = []
+
 def _set_current_socket(s: socket.socket | None):
     global _CURRENT_SOCKET
     _CURRENT_SOCKET = s
@@ -452,113 +452,263 @@ def send_messages(client_socket: socket.socket, nickname: str, stop_event: threa
         if not sent:
             print("[client] Gửi thất bại. Thử lại nhé!")
 
+import threading, time, os, re
+from typing import Dict, Set, Optional
+from configs import SERVER_NAME
 
-# ===== END RECONNECT PATCH =====
+# Giữ lại bản gốc để fallback khi cần
+__orig_handle_chat_message = handle_chat_message
 
-LOG_DIR = "logs"
-_history_lock = threading.Lock()
+# -------------------------
+# State cho "phòng"
+# Key theo socket để tránh dùng ChatClient (không hashable do override __eq__)
+# -------------------------
+_rooms_lock = threading.RLock()
+_rooms: Dict[str, Set[socket.socket]] = {"lobby": set()}  # phòng -> tập socket
+_sock_room: Dict[socket.socket, str] = {}                  # socket -> phòng hiện tại
 
-def _ensure_log_dir():
-    os.makedirs(LOG_DIR, exist_ok=True)
+# Nếu True: chat ở #lobby sẽ phát TOÀN CỤC (mọi phòng)
+LOBBY_GLOBAL = True
 
-def _safe_filename(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_\-]", "_", name)
+# -------------------------
+# Helpers
+# -------------------------
+def _now_ts() -> int:
+    return int(time.time())
 
-def _dm_log_filename(a: str, b: str) -> str:
-    a1, b1 = sorted([a, b], key=str.lower)
-    return os.path.join(LOG_DIR, f"dm__{_safe_filename(a1)}__{_safe_filename(b1)}.log")
+def _server_chat(text: str) -> GenericMessage:
+    cm = ChatMessage(sender=SERVER_NAME, content=text, timestamp=_now_ts())
+    return GenericMessage(type=MessageType.CHAT, payload=cm.model_dump())
 
-def _room_log_filename(room: str) -> str:
-    return os.path.join(LOG_DIR, f"room__{_safe_filename(room)}.log")
+def _client_by_socket(sock: socket.socket) -> Optional[ChatClient]:
+    with clients_lock:
+        for c in clients:
+            if c.socket is sock:
+                return c
+    return None
 
-def _append_history_line(path: str, line: str):
-    _ensure_log_dir()
-    with _history_lock:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line.rstrip("\n") + "\n")
+def _username_by_socket(sock: socket.socket) -> str:
+    c = _client_by_socket(sock)
+    return (c.username if c and c.username else "unknown")
 
-def _tail_history(path: str, n: int = 20) -> str:
-    if not os.path.exists(path):
-        return "(no history)"
-    with _history_lock:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    last = "".join(lines[-n:])
-    return last or "(no history)"
+def _ensure_in_lobby(cli: ChatClient):
+    """Lần đầu thấy socket -> cho vào lobby."""
+    s = cli.socket
+    with _rooms_lock:
+        if s not in _sock_room:
+            _rooms.setdefault("lobby", set()).add(s)
+            _sock_room[s] = "lobby"
 
-# --- Save originals to wrap ---
-_original_broadcast = broadcast
-_original_handle_private_message = handle_private_message
-_original_handle_chat_message = handle_chat_message
+def _join_room(cli: ChatClient, room: str):
+    s = cli.socket
+    with _rooms_lock:
+        # rời phòng cũ
+        old = _sock_room.get(s)
+        if old and s in _rooms.get(old, set()):
+            _rooms[old].discard(s)
+        # vào phòng mới
+        _rooms.setdefault(room, set()).add(s)
+        _sock_room[s] = room
 
-# --- Wrap broadcast: log all public chats to 'global' ---
-def broadcast(message_bytes: bytes, sending_client: ChatClient):
-    # Keep original behavior
-    _original_broadcast(message_bytes, sending_client)
-    # Best-effort decode and log
-    try:
-        generic_msg = GenericMessage.model_validate_json(message_bytes)
-        if generic_msg.type == MessageType.CHAT:
-            chat = ChatMessage.model_validate(generic_msg.payload)
-            # One global room (main code has no rooms)
-            _append_history_line(
-                _room_log_filename("global"),
-                f"{chat.timestamp}\t{chat.sender}\t{chat.content}",
-            )
-    except Exception:
-        pass
+def _current_room(cli: ChatClient) -> str:
+    with _rooms_lock:
+        return _sock_room.get(cli.socket, "lobby")
 
-# --- Wrap private message: also log to dm__A__B.log ---
-def handle_private_message(chat_message: ChatMessage, sending_client: ChatClient):
-    _original_handle_private_message(chat_message, sending_client)
-    try:
-        # content format: "/pm <recipient> <message...>"
-        _, recipient, content = chat_message.content.split(" ", 2)
-        _append_history_line(
-            _dm_log_filename(chat_message.sender, recipient),
-            f"{chat_message.timestamp}\t{chat_message.sender}\t{content}",
-        )
-    except Exception:
-        pass
+def _list_rooms() -> list[str]:
+    with _rooms_lock:
+        return sorted(_rooms.keys())
 
-# --- Wrap chat handler: add '/history' commands ---
+def _list_users_in_room(room: str) -> list[str]:
+    with _rooms_lock:
+        socks = list(_rooms.get(room, set()))
+    names = [_username_by_socket(s) for s in socks]
+    return sorted([n for n in names if n])
+
+# --- History helpers: tái dùng các hàm *_room_log_filename / *_dm_log_filename nếu đã có ---
+# Nếu các hàm đã được patch trước đó tồn tại (history patch), ta dùng lại chúng.
+# Nếu chưa có, định nghĩa tối thiểu tại đây.
+try:
+    _room_log_filename
+except NameError:
+    LOG_DIR = "logs"
+    _history_lock = threading.Lock()
+    def _ensure_log_dir():
+        os.makedirs(LOG_DIR, exist_ok=True)
+    def _safe_filename(name: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_\-]", "_", name)
+    def _dm_log_filename(a: str, b: str) -> str:
+        a1, b1 = sorted([a, b], key=str.lower)
+        return os.path.join(LOG_DIR, f"dm__{_safe_filename(a1)}__{_safe_filename(b1)}.log")
+    def _room_log_filename(room: str) -> str:
+        return os.path.join(LOG_DIR, f"room__{_safe_filename(room)}.log")
+    def _append_history_line(path: str, line: str):
+        _ensure_log_dir()
+        with _history_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line.rstrip("\n") + "\n")
+    def _tail_history(path: str, n: int = 20) -> str:
+        if not os.path.exists(path):
+            return "(no history)"
+        with _history_lock:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        last = "".join(lines[-n:])
+        return last or "(no history)"
+
+# -------------------------
+# Lệnh phòng & history
+# -------------------------
+_room_cmd_alias = {"room", "phong"}  # hỗ trợ "/join room X" kiểu câu tự nhiên
+
+def _parse_room_from_parts(parts: list[str], idx: int) -> Optional[str]:
+    """
+    Lấy tên phòng từ mảng tokens:
+      /create <room>
+      /create room <room>
+    """
+    if len(parts) <= idx:
+        return None
+    room = parts[idx]
+    if room.lower() in _room_cmd_alias and len(parts) > idx + 1:
+        room = parts[idx + 1]
+    return room
+
+# -------------------------
+# Override: handle_chat_message (thêm rooms + history)
+# -------------------------
 def handle_chat_message(generic_msg: GenericMessage, sending_client: ChatClient) -> None:
+    """
+    Hỗ trợ:
+      /rooms
+      /users                -> liệt kê user trong phòng hiện tại
+      /create <room>        (hoặc: /create room <room>)
+      /join <room>          (hoặc: /join room <room>)
+      /leave                -> về lobby
+      /whereami             -> phòng hiện tại
+      /history [N]          -> N dòng cuối của phòng hiện tại
+      /history @user [N]    -> N dòng cuối DM với @user
+    Ngoài ra: chat thường sẽ được gắn tag [#room] và chỉ phát trong phòng (trừ lobby có thể phát toàn cục nếu LOBBY_GLOBAL=True).
+    """
+    # Parse trước; nếu lỗi thì fallback gốc
     try:
-        chat_message = ChatMessage.model_validate(generic_msg.payload)
+        chat = ChatMessage.model_validate(generic_msg.payload)
     except Exception:
-        # Fallback to original if anything odd
-        return _original_handle_chat_message(generic_msg, sending_client)
+        return __orig_handle_chat_message(generic_msg, sending_client)
 
-    text = (chat_message.content or "").strip()
-    if text.startswith("/history"):
+    # Bảo đảm đã ở lobby
+    _ensure_in_lobby(sending_client)
+
+    text = (chat.content or "").strip()
+
+    # Giữ lại DM gốc (đồng thời nếu trước đó đã có DM-history patch, nó sẽ log DM)
+    if chat.is_private:
+        return handle_private_message(chat, sending_client)
+
+    # --- COMMANDS ---
+    if text.startswith("/"):
         parts = text.split()
-        # /history @user [N]
-        if len(parts) >= 2 and parts[1].startswith("@"):
-            target = parts[1][1:]
-            n = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 20
-            path = _dm_log_filename(chat_message.sender, target)
-            out = _tail_history(path, n)
-            resp = ServerResponse(
-                status=ServerResponseStatus.SUCCESS,
-                message=f"DM history @{target} (last {n}):\n{out}",
-            )
-        else:
+        cmd = parts[0].lower()
+
+        # /rooms
+        if cmd == "/rooms":
+            names = ", ".join(f"#{r}" for r in _list_rooms())
+            send_generic_message_bytes(_server_chat("Rooms: " + (names or "(none)")).encoded_bytes, sending_client)
+            return
+
+        # /users (theo phòng hiện tại)
+        if cmd == "/users":
+            room = _current_room(sending_client)
+            names = ", ".join(_list_users_in_room(room)) or "(no users)"
+            send_generic_message_bytes(_server_chat(f"Users in #{room}: {names}").encoded_bytes, sending_client)
+            return
+
+        # /create <room> | /create room <room>
+        if cmd == "/create":
+            room = _parse_room_from_parts(parts, 1)
+            if not room:
+                send_generic_message_bytes(_server_chat("Usage: /create <room>").encoded_bytes, sending_client)
+                return
+            _join_room(sending_client, room)
+            send_generic_message_bytes(_server_chat(f"Created and joined #{room}").encoded_bytes, sending_client)
+            return
+
+        # /join <room> | /join room <room>
+        if cmd == "/join":
+            room = _parse_room_from_parts(parts, 1)
+            if not room:
+                send_generic_message_bytes(_server_chat("Usage: /join <room>").encoded_bytes, sending_client)
+                return
+            _join_room(sending_client, room)
+            send_generic_message_bytes(_server_chat(f"Joined #{room}").encoded_bytes, sending_client)
+            return
+
+        # /leave -> lobby
+        if cmd == "/leave":
+            _join_room(sending_client, "lobby")
+            send_generic_message_bytes(_server_chat("Joined #lobby").encoded_bytes, sending_client)
+            return
+
+        # /whereami
+        if cmd == "/whereami":
+            room = _current_room(sending_client)
+            send_generic_message_bytes(_server_chat(f"You are in #{room}").encoded_bytes, sending_client)
+            return
+
+        # /history ...
+        if cmd == "/history":
+            room = _current_room(sending_client)
+            # /history @user [N]
+            if len(parts) >= 2 and parts[1].startswith("@"):
+                target = parts[1][1:]
+                n = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 20
+                path = _dm_log_filename(_username_by_socket(sending_client.socket), target)
+                out = _tail_history(path, n)
+                send_generic_message_bytes(_server_chat(f"DM history @{target} (last {n}):\n{out}").encoded_bytes, sending_client)
+                return
             # /history [N]
             n = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 20
-            path = _room_log_filename("global")
+            path = _room_log_filename(room)
             out = _tail_history(path, n)
-            resp = ServerResponse(
-                status=ServerResponseStatus.SUCCESS,
-                message=f"Global history (last {n}):\n{out}",
-            )
+            send_generic_message_bytes(_server_chat(f"Room history #{room} (last {n}):\n{out}").encoded_bytes, sending_client)
+            return
 
-        resp_msg = GenericMessage(type=MessageType.RESPONSE, payload=resp.model_dump())
-        send_generic_message_bytes(resp_msg.encoded_bytes, sending_client)
-        return
+        # Không phải các lệnh trên -> rơi về handler gốc để giữ behavior cũ (/pm kiểu khác…)
+        return __orig_handle_chat_message(generic_msg, sending_client)
 
-    # Not a history command → original behavior
-    _original_handle_chat_message(generic_msg, sending_client)
+    # --- CHAT THƯỜNG ---
+    room = _current_room(sending_client)
 
+    # Nội dung gắn tag hiển thị
+    tagged = ChatMessage(
+        sender=chat.sender,
+        content=f"[#{room}] {chat.content}",
+        timestamp=chat.timestamp,
+    )
+    out_msg = GenericMessage(type=MessageType.CHAT, payload=tagged.model_dump())
+    out_bytes = out_msg.encoded_bytes
+
+    # Gửi theo phòng (trừ lobby có thể phát toàn cục)
+    if LOBBY_GLOBAL and room == "lobby":
+        # phát toàn cục (mọi socket đang online), trừ người gửi
+        with clients_lock:
+            for c in list(clients):
+                if c is not sending_client:
+                    send_generic_message_bytes(out_bytes, c)
+    else:
+        with _rooms_lock:
+            targets = list(_rooms.get(room, set()))
+        for s in targets:
+            c = _client_by_socket(s)
+            if c and c is not sending_client:
+                send_generic_message_bytes(out_bytes, c)
+
+    # Ghi log room (không tag để history sạch)
+    try:
+        _append_history_line(_room_log_filename(room), f"{chat.timestamp}\t{chat.sender}\t{chat.content}")
+    except Exception:
+        pass
+
+# ===== END ROOMS + HISTORY PATCH =====
 def main():
     """
     Main server loop to accept incoming client connections.
