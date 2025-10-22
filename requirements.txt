@@ -62,3 +62,4 @@ typing-inspection==0.4.1
 typing_extensions==4.15.0
 tzdata==2025.2
 wcwidth==0.2.14
+pyinstaller==6.16.0
