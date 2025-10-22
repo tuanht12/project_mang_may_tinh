@@ -20,3 +20,4 @@ def get_local_ip():
 
 if __name__ == "__main__":
     print("Local IP Address:", get_local_ip())
+    print("Use this IP in the 'configs.py' file for both server and client.")

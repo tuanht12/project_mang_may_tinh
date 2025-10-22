@@ -7,23 +7,6 @@ from configs import QUIT_COMMAND
 from schemas import AuthAction
 
 
-def get_local_ip():
-    """
-    Tries to determine the local IP address of the machine.
-    Returns '127.0.0.1' on failure.
-    """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # This doesn't send any data, it just opens a socket to determine the route.
-        s.connect(("8.8.8.8", 1))
-        IP = s.getsockname()[0]
-    except Exception:
-        IP = "127.0.0.1"  # Fallback to loopback address
-    finally:
-        s.close()
-    return IP
-
-
 def add_new_user_to_db(
     current_df: pd.DataFrame, username: str, password: str
 ) -> pd.DataFrame:
