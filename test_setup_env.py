@@ -1,3 +1,9 @@
+"""
+Test sau khi thiết lập môi trường.
+Kiểm tra xem tất cả các module cần thiết có thể được nhập thành công hay không.
+In ra "Hello, World!" nếu tất cả các module được nhập thành công.
+"""
+
 import socket
 import threading
 import time
@@ -7,6 +13,7 @@ import sys
 
 
 def assert_python_version():
+    """Đảm bảo phiên bản Python là 3.9 hoặc cao hơn."""
     version_python = sys.version_info
     if version_python.major != 3 or version_python.minor < 9:
         raise EnvironmentError(
