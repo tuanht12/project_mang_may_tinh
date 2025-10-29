@@ -1,3 +1,15 @@
+"""\
+Đây là file chính cho phía máy khách (client) của ứng dụng chat.
+Trách nhiệm của nó bao gồm:
+- Tạo kết nối đến server.
+- Cung cấp giao diện dòng lệnh (CLI) cho người dùng.
+- Xử lý quá trình xác thực (Đăng nhập/Đăng ký).
+- Bắt đầu phiên chat, sử dụng 2 luồng:
+    1. Luồng chính (Main Thread) để gửi tin nhắn (chờ input).
+    2. Luồng nhận (Receive Thread) để nhận tin nhắn (chờ recv).
+- Xử lý việc mất kết nối và tự động kết nối lại (reconnect).
+"""
+
 import time
 from schemas import (
     AuthAction,
@@ -19,16 +31,28 @@ SLEEP_BETWEEN_RETRIES = 2  # seconds
 
 
 def attempt_reconnection(client_credentials):
-    """Attempt to reconnect to server"""
+    """
+    Cố gắng kết nối lại với máy chủ sau khi bị mất kết nối.
+    Hàm này sẽ thử kết nối lại và tự động đăng nhập lại.
+
+    Args:
+        client_credentials (dict): Thông tin đăng nhập (username, password)
+                                   của người dùng.
+
+    Returns:
+        socket.socket: Một đối tượng socket mới đã kết nối và xác thực thành công.
+        None: Nếu không thể kết nối lại sau tất cả các lần thử.
+    """
     for attempt in range(1, MAX_RECONNECTION_ATTEMPTS + 1):
         print(f"Reconnection attempt {attempt}/{MAX_RECONNECTION_ATTEMPTS}")
+        # Tăng thời gian chờ giữa các lần thử
         sleep_time = SLEEP_BETWEEN_RETRIES**attempt
-        # Try to create new connection
+        # 1. Thử tạo kết nối mới
         new_socket = create_connection()
         if new_socket is None:
             time.sleep(sleep_time)
             continue
-        # Try to re-authenticate
+        # 2. Thử xác thực lại
         is_passed, _ = authenticate_with_server(
             new_socket, AuthAction.LOGIN, client_credentials
         )
@@ -49,7 +73,13 @@ def receive_messages(
     reconnect_event: threading.Event,
 ):
     """
-    Listens for incoming messages from the server and prints them.
+    Hàm chạy trong một luồng riêng, chuyên để lắng nghe
+    và nhận tin nhắn từ server.
+
+    Args:
+        client_socket (socket.socket): Socket đang kết nối.
+        stop_event (threading.Event): Cờ hiệu để dừng luồng (khi người dùng /quit).
+        reconnect_event (threading.Event): Cờ hiệu báo cần kết nối lại.
     """
     should_reconnect = False
     while not stop_event.is_set():
@@ -73,25 +103,35 @@ def receive_messages(
             break
         except Exception:
             break
-    # Signal other threads to stop
+    # --- Dọn dẹp luồng nhận ---
+    # Nếu cần kết nối lại, kích hoạt cờ hiệu
     if should_reconnect and not reconnect_event.is_set():
         reconnect_event.set()
+    # Luôn kích hoạt cờ stop để báo cho luồng gửi dừng lại
     if not stop_event.is_set():
         stop_event.set()
 
 
 def send_message_text(message_text: str, client_socket: socket.socket, nickname: str):
-    """Send a single message to the server."""
+    """
+    Đóng gói và gửi một tin nhắn văn bản đến server.
+
+    Args:
+        message_text (str): Nội dung tin nhắn thô từ người dùng.
+        client_socket (socket.socket): Socket đang kết nối.
+        nickname (str): Tên người dùng hiện tại.
+    """
     if message_text:
-        # Format the message with the nickname
+        # Tạo và đóng gói tin nhắn chat
+
         chat_msg = ChatMessage(
             sender=nickname, content=message_text, timestamp=int(time.time())
         )
+        # Đóng gói tin nhắn chat vào GenericMessage
         generic_msg = GenericMessage(
             type=MessageType.CHAT, payload=chat_msg.model_dump()
         )
-
-        # Send the message to the server
+        # Gửi tin nhắn đã đóng gói đến server
         client_socket.send(generic_msg.encoded_bytes)
 
 
@@ -103,19 +143,32 @@ def send_messages(
     message_buffer: Queue,
 ):
     """
-    Takes user input and sends it to the server.
+    Hàm chạy trong luồng chính, chuyên để lấy input từ người dùng
+    và gửi tin nhắn đi.
+
+    Args:
+        client_socket (socket.socket): Socket đang kết nối.
+        nickname (str): Tên người dùng.
+        stop_event (threading.Event): Cờ hiệu để dừng luồng.
+        reconnect_event (threading.Event): Cờ hiệu báo cần kết nối lại.
+        message_buffer (Queue): Hàng đợi để lưu tin nhắn khi mất kết nối.
     """
     should_reconnect = False
     while not stop_event.is_set():
         try:
-            # Get message from user input
+            # --- Gửi tin nhắn trong bộ đệm (nếu có) ---
+            # (Xảy ra sau khi kết nối lại thành công)
             while not message_buffer.empty():
                 message_text = message_buffer.get()
                 send_message_text(message_text, client_socket, nickname)
+            # --- Nhận input từ người dùng ---
             message_text = input("> ")
+
+            # Kiểm tra lệnh thoát
             if message_text.strip() == QUIT_COMMAND:
                 print("Exiting chat...")
                 break
+            # Nếu luồng nhận phát hiện mất kết nối
             if reconnect_event.is_set():
                 message_buffer.put(message_text)
                 break
@@ -130,19 +183,19 @@ def send_messages(
         except Exception as e:
             print(f"Failed to send message. Connection might be closed. Error: {e}")
             break
-    # Signal other threads to stop
+    # --- Dọn dẹp luồng gửi ---
     if should_reconnect and not reconnect_event.is_set():
         reconnect_event.set()
     if not stop_event.is_set():
-        stop_event.set()  # Signal other threads to stop
+        stop_event.set()
 
 
 def create_connection() -> socket.socket:
     """
-    Creates and establishes a connection to the server.
+    Tạo và thiết lập một kết nối socket mới đến server.
 
     Returns:
-        socket.socket: Connected socket or None if connection fails
+        socket.socket: Socket đã kết nối, hoặc None nếu thất bại.
     """
     try:
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -163,25 +216,29 @@ def authenticate_with_server(
     client_socket: socket.socket, action: AuthAction, client_credentials: dict
 ) -> tuple[bool, socket.socket]:
     """
-    Attempts to authenticate with the server, with reconnection logic.
+    Gửi yêu cầu xác thực (Đăng nhập/Đăng ký) đến server.
+    Hàm này có logic tự động thử lại nếu kết nối bị gián đoạn.
+
     Args:
-        client_socket: Socket connection to server
-        action: Login or register action
-        client_credentials: Dictionary with 'username' and 'password' keys
+        client_socket (socket.socket): Socket để gửi yêu cầu.
+        action (AuthAction): Hành động (LOGIN hoặc REGISTER).
+        client_credentials (dict): Chứa 'username' và 'password'.
 
     Returns:
-        tuple[bool, socket.socket]: (success, socket) -
-        success status and potentially new socket
+        tuple[bool, socket.socket]: (Thành công, socket đã dùng)
+             - (True, socket) nếu đăng nhập thành công.
+             - (False, socket) nếu thất bại nhưng socket vẫn ổn.
+             - (False, None) nếu thất bại và không thể kết nối lại.
     """
     current_socket = client_socket
-
+    # Tạo yêu cầu xác thực
     auth_req = AuthRequest(
         action=action,
         username=client_credentials["username"],
         password=client_credentials["password"],
     )
     auth_msg = GenericMessage(type=MessageType.AUTH, payload=auth_req.model_dump())
-
+    # Vòng lặp thử lại (dùng cho trường hợp mất kết nối khi đang xác thực)
     for attempt in range(1, MAX_RECONNECTION_ATTEMPTS + 1):
         try:
             current_socket.send(auth_msg.encoded_bytes)
@@ -231,35 +288,36 @@ def perform_authentication(
     client_socket: socket.socket, client_credentials: dict
 ) -> tuple[str, socket.socket]:
     """
-    Handles the complete authentication process.
+    Xử lý toàn bộ quy trình xác thực người dùng (menu, nhập liệu,
+    gửi yêu cầu, nhận phản hồi).
 
     Args:
-        client_socket: Socket connection to server
-        client_credentials: Dictionary to store credentials
+        client_socket (socket.socket): Socket ban đầu.
+        client_credentials (dict): Một dict rỗng để lưu trữ thông tin.
 
     Returns:
-        tuple[str, socket.socket]: (username, socket) if successful,
-        (None, socket) otherwise
+        tuple[str, socket.socket]: (username, socket) nếu thành công,
+                                   (None, socket) nếu thất bại.
     """
     current_socket = client_socket
 
     while True:
         try:
-            # Get user action (login/register)
+            # 1. Hiển thị menu (Đăng nhập / Đăng ký)
             action = request_user_login_register()
             if action is None:
                 return None, current_socket
 
-            # Get credentials
+            # 2. Lấy thông tin (username / password)
             username, password = get_user_credentials()
             if username is None or password is None:
                 continue
 
-            # Store credentials for authentication
+            # Lưu thông tin xác thực đêng sử dụng sau này
             client_credentials["username"] = username
             client_credentials["password"] = password
 
-            # Attempt authentication with reconnection logic
+            # 3. Gửi yêu cầu xác thực đến server
             success, new_socket = authenticate_with_server(
                 current_socket, action, client_credentials
             )
@@ -283,23 +341,29 @@ def perform_authentication(
 
 def start_chat_session(client_socket: socket.socket, client_credentials: dict):
     """
-    Starts the chat session with separate threads for sending and receiving.
+    Bắt đầu phiên chat chính.
+    Quản lý vòng lặp chạy 2 luồng (gửi/nhận) và xử lý
+    logic tự động kết nối lại.
 
     Args:
-        client_socket: Authenticated socket connection
-        username: Authenticated username
+        client_socket (socket.socket): Socket đã được xác thực.
+        client_credentials (dict): Thông tin của người dùng.
     """
-    message_buffer = Queue()
+    message_buffer = Queue()  # Hàng đợi lưu tin nhắn khi mất kết nối
+
+    # Vòng lặp chính của phiên chat
+    # Vòng lặp này sẽ lặp lại mỗi khi thực hiện kết nối lại
     while True:
         stop_event = threading.Event()
         reconnect_event = threading.Event()
+        # --- Bắt đầu luồng nhận ---
         receive_thread = threading.Thread(
             target=receive_messages, args=(client_socket, stop_event, reconnect_event)
         )
         receive_thread.daemon = True
         receive_thread.start()
 
-        # The main thread handles sending messages
+        # --- Bắt đầu luồng gửi (chạy trên luồng chính) ---
         send_messages(
             client_socket,
             client_credentials["username"],
@@ -327,16 +391,16 @@ def start_chat_session(client_socket: socket.socket, client_credentials: dict):
 
 def run():
     """
-    Main entry point for the chat client.
-    Coordinates connection, authentication, and chat session.
+    Hàm `run` chính của client.
+    Điều phối toàn bộ quá trình: Kết nối, Xác thực, Chat.
     """
-    # Establish connection
+    # 1. Tạo kết nối ban đầu
     client_socket = create_connection()
     if client_socket is None:
         return
     client_credentials = {"username": None, "password": None}
     try:
-        # Perform authentication
+        # 2. Thực hiện xác thực
         username, client_socket = perform_authentication(
             client_socket, client_credentials
         )
@@ -344,10 +408,11 @@ def run():
             print("Exiting...")
             return
 
-        # Start chat session
+        # 3. Bắt đầu phiên chat
         start_chat_session(client_socket, client_credentials)
     finally:
-        # Always clean up the connection
+        # --- Dọn dẹp cuối cùng ---
+        # Đảm bảo socket luôn được đóng khi chương trình kết thúc
         if client_socket:
             close_socket(client_socket)
 
