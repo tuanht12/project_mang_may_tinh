@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # Connection settings
-SERVER_HOST = "127.0.0.1"  # Change this to IPV4 address of your server
+SERVER_HOST = "192.168.32.1"  # Change this to IPV4 address of your server
 SERVER_PORT = 65432
 DEFAULT_BUFFER_SIZE = 1024
 
